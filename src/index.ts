@@ -32,6 +32,7 @@ import {
   wrapUpNudge,
 } from './prompts.js'
 import { installBusyEnterDefault } from './steering.js'
+import { TaskStateController } from './task-state.js'
 import {
   appendRunEvent,
   createRunState,
@@ -68,6 +69,7 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
     return service?.currentSelection()
   }
   const ultra = new UltraModeController(settings, defaultSelection)
+  const taskState = new TaskStateController()
   const selectMax = (agent: Agent): void => {
     const selection = latestModelSelection(agent.session.snapshotEvents())
     if (selection?.reasoningEffort !== 'ultra') return
@@ -176,6 +178,7 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
 
       const additions: UserMessage[] = []
       additions.push(...ultra.onPreStep({ agent, messages, turn, step }))
+      additions.push(...taskState.onPreStep(agent))
 
       const key = sessionKey(agent)
       const current = runs.get(key)

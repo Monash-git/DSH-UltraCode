@@ -203,6 +203,15 @@ async function createHarness(script, options = {}) {
   const workflow = options.workflowTool === true ? createWorkflowTool() : undefined
   if (workflow !== undefined) ctx.tools.register(workflow.tool)
 
+  // Observe skill lookups so prompt-only hooks can be checked for skill-file reads.
+  const skillReads = []
+  const skillRegistry = ctx.skills
+  const originalSkillGet = skillRegistry.get.bind(skillRegistry)
+  skillRegistry.get = (skillName, skillOptions) => {
+    skillReads.push(skillName)
+    return originalSkillGet(skillName, skillOptions)
+  }
+
   ctx.llm.registerAdapter(['deepseek-official'], adapter)
   const handle = await ctx.agents.create({
     sessionId: SessionId(`ultracode-v2-${sessionSeq += 1}`),
@@ -218,7 +227,7 @@ async function createHarness(script, options = {}) {
     },
   })
   await new Promise(resolve => setTimeout(resolve, 10))
-  return { ctx, adapter, agent: handle.agent, handle, wait, workflow }
+  return { ctx, adapter, agent: handle.agent, handle, wait, workflow, skillReads }
 }
 
 function user(text) {
@@ -246,6 +255,22 @@ function pauseRecords(agent) {
   return agent.session.snapshotEvents()
     .map(event => pluginData(event, 'plugin:ultracode/pause'))
     .filter(Boolean)
+}
+
+const TASK_STATE_MARKER = '[ultracode:task-state]'
+const TASK_STATE_SENTENCE = 'Any multi-step task: keep the todo list current.'
+const REPLY_FIRST = 'Reply first: a direct user question'
+
+function requestText(request) {
+  return JSON.stringify(request.messages)
+}
+
+function occurrences(text, needle) {
+  return text.split(needle).length - 1
+}
+
+function taskStateMessage(request) {
+  return request.messages.find(message => JSON.stringify(message).includes(TASK_STATE_MARKER))
 }
 
 function assertCacheStable(firstRequest, secondRequest, events) {
@@ -285,14 +310,110 @@ async function scenarioTdd() {
     h.agent.followup(user('/tdd'))
     await withTimeout(h.agent.whenIdle(), 'tdd scenario')
     assert.equal(h.adapter.requests.length, 2, 'the model should be asked twice')
+    assert.ok(
+      requestText(h.adapter.requests[0]).includes(TASK_STATE_SENTENCE),
+      'the first autopilot request should carry the generic task-state prompt',
+    )
     const second = JSON.stringify(h.adapter.requests[1].messages)
     assert.ok(second.includes('autopilot_continue'), 'the second request should carry the continuation nudge')
     assert.ok(second.includes('/tdd'), 'the second request should retain the skill invocation')
+    assert.equal(
+      occurrences(second, TASK_STATE_MARKER),
+      1,
+      'the task-state prompt must be injected once per root session',
+    )
+    assert.ok(
+      h.skillReads.every(name => name === 'tdd'),
+      `no hook may read an unrelated skill file; reads: ${h.skillReads.join(', ')}`,
+    )
     assertCacheStable(h.adapter.requests[0], h.adapter.requests[1], h.agent.session.snapshotEvents())
     const phases = runPhases(h.agent)
     assert.ok(phases.includes('running'))
     assert.ok(phases.includes('completed'), `tdd run should complete; phases: ${phases.join(', ')}`)
     return { scenario: 'tdd', requests: h.adapter.requests.length, phases }
+  } finally {
+    await h.handle.dispose()
+  }
+}
+
+async function scenarioTaskState() {
+  const h = await createHarness([
+    textResponse('Hello.'),
+    textResponse('Still here.'),
+  ])
+  try {
+    h.agent.followup(user('hello'))
+    await withTimeout(h.agent.whenIdle(), 'task-state trivial first turn')
+    assert.equal(h.adapter.requests.length, 1, 'a trivial turn should be one model call')
+    const first = h.adapter.requests[0]
+    const prompt = taskStateMessage(first)
+    assert.ok(prompt, 'the first request should carry the generic task-state prompt')
+    assert.ok(JSON.stringify(prompt).includes(TASK_STATE_SENTENCE))
+    assert.doesNotMatch(
+      JSON.stringify(prompt),
+      /ticket|phase|skill|wayfinder|tdd/i,
+      'the task-state prompt must contain no ticket, phase, or skill vocabulary',
+    )
+    assert.equal(h.skillReads.length, 0, 'the task-state hook must not read skill files')
+
+    h.agent.followup(user('thanks'))
+    await withTimeout(h.agent.whenIdle(), 'task-state second turn')
+    assert.equal(
+      occurrences(requestText(h.adapter.requests[1]), TASK_STATE_MARKER),
+      1,
+      'the task-state prompt must be appended once per root session',
+    )
+    assertCacheStable(h.adapter.requests[0], h.adapter.requests[1], h.agent.session.snapshotEvents())
+    return { scenario: 'task-state', requests: h.adapter.requests.length, skillReads: h.skillReads.length }
+  } finally {
+    await h.handle.dispose()
+  }
+}
+
+async function scenarioReplyFirst() {
+  const h = await createHarness([
+    toolCallResponse('call-progress-wait', 'wait_tool', {}, 'Starting the first check.'),
+    toolCallResponse(
+      'call-progress-workflow',
+      'workflow',
+      { script: 'return { ok: true }' },
+      'Progress: one of three checks is done. Starting the next check now.',
+    ),
+    toolCallResponse('call-progress-complete', 'complete_run', { summary: 'progress reported and run completed' }, 'All checks done.'),
+  ], { waitTool: true, workflowTool: true })
+  try {
+    h.agent.followup(user('/tdd'))
+    await withTimeout(h.wait.started, 'reply-first wait start')
+    assert.ok(
+      requestText(h.adapter.requests[0]).includes(REPLY_FIRST),
+      'the autopilot banner should carry the reply-first rule',
+    )
+
+    h.agent.steer(user('进度如何了？'))
+    h.wait.release()
+    await withTimeout(h.agent.whenIdle(), 'reply-first scenario')
+
+    assert.equal(h.adapter.requests.length, 3, 'the run should continue through the progress answer')
+    assert.ok(
+      requestText(h.adapter.requests[1]).includes('进度如何了？'),
+      'the progress question must reach the next model call',
+    )
+    assert.equal(h.workflow.calls.length, 1, 'the model should start the next diagnostic after answering')
+
+    const events = h.agent.session.snapshotEvents()
+    const answerIndex = events.findLastIndex(event =>
+      event.type === 'assistant/message'
+      && JSON.stringify(event.data).includes('Progress: one of three checks is done.'))
+    const diagnosticIndex = events.findLastIndex(event =>
+      event.type === 'tool/call' && event.data.name === 'workflow')
+    assert.ok(answerIndex >= 0, 'the assistant should answer the progress question with text')
+    assert.ok(answerIndex < diagnosticIndex, 'assistant text must precede the next diagnostic')
+
+    const phases = runPhases(h.agent)
+    assert.ok(phases.includes('completed'), `asking for progress must not stop the run; phases: ${phases.join(', ')}`)
+    assert.ok(!phases.includes('waiting_user'), 'a progress question is not a requirement question')
+    assertCacheStable(h.adapter.requests[0], h.adapter.requests[1], h.agent.session.snapshotEvents())
+    return { scenario: 'reply-first', requests: h.adapter.requests.length, phases }
   } finally {
     await h.handle.dispose()
   }
@@ -316,6 +437,8 @@ async function scenarioUltra() {
     const first = JSON.stringify(h.adapter.requests[0].messages)
     assert.ok(first.includes('[ultracode:standing]'), 'the first request should carry the standing playbook')
     assert.ok(first.includes('audit the repository'), 'the first request should carry the task')
+    assert.ok(first.includes(REPLY_FIRST), 'the Ultra playbook should carry reply-first')
+    assert.ok(first.includes(TASK_STATE_SENTENCE), 'the first Ultra request should carry the task-state prompt')
     assert.equal(runPhases(h.agent).length, 0, 'selector Ultra must not create an autopilot run')
 
     h.agent.followup(user('continue the audit'))
@@ -502,6 +625,8 @@ async function scenarioIndependentInstall() {
 const results = []
 for (const scenario of [
   scenarioTdd,
+  scenarioTaskState,
+  scenarioReplyFirst,
   scenarioUltra,
   scenarioUltraWorkflow,
   scenarioSteer,
