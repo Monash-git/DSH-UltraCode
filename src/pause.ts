@@ -17,6 +17,7 @@ import {
   isRootAgent,
   isUnfinishedPhase,
   lastSeq,
+  latestPauseInfo,
   latestTurnEnd,
   openTurn,
   sessionKey,
@@ -47,14 +48,9 @@ export class PauseController {
     if (!isRootAgent(agent)) return
     const key = sessionKey(agent)
     const events = agent.session.snapshotEvents()
-    let latestPause: { paused: boolean; reason: PauseReason | ClearReason; turn: number; atSeq: number } | undefined
-    let pauseSeq = -1
-    for (const event of events) {
-      if (event.type === 'ultracode/pause') {
-        latestPause = event.data
-        pauseSeq = event.seq
-      }
-    }
+    const pauseInfo = latestPauseInfo(events)
+    const latestPause = pauseInfo?.data
+    const pauseSeq = pauseInfo?.seq ?? -1
     if (latestPause?.paused === true) {
       this.paused.set(key, {
         reason: latestPause.reason,

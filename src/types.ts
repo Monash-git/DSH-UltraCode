@@ -85,10 +85,16 @@ declare module '@deepseek-ai/dsh-llm' {
 }
 
 declare module '@deepseek-ai/dsh-session' {
-  interface SessionEventMap {
-    'autopilot/run': AutopilotRunEvent
-    'ultracode/mode': UltracodeModeEvent
-    'ultracode/pause': UltracodePauseEvent
+  /**
+   * These are plugin records, not released `SessionEventMap` members. The
+   * persistence reader skips unknown types only when the envelope is
+   * `ignorable`; `appendPluginRecord` sets that marker and keeps the records
+   * outside the release schema.
+   */
+  interface PluginRecordMap {
+    'plugin:ultracode/run': AutopilotRunEvent
+    'plugin:ultracode/mode': UltracodeModeEvent
+    'plugin:ultracode/pause': UltracodePauseEvent
   }
 }
 

@@ -52,6 +52,10 @@ describe('run state', () => {
     expect(runEvent?.phase).toBe('running')
     expect(runEvent?.round).toBe(1)
     expect(latestModeEvent(events)?.enabled).toBe(true)
+    const runRecord = events.find(event => (event.type as string) === 'plugin:ultracode/run')
+    const modeRecord = events.find(event => (event.type as string) === 'plugin:ultracode/mode')
+    expect(runRecord?.ignorable).toBe(true)
+    expect(modeRecord?.ignorable).toBe(true)
 
     const restored = fromRunEvent(runEvent!, config)
     expect(restored.skill).toBe('implement')

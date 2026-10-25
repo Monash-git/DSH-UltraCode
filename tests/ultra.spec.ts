@@ -4,6 +4,7 @@ import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { describe, expect, it } from 'vitest'
 import { resolveConfig } from '../src/config.js'
 import { ULTRA_REMINDER_PREFIX, ULTRA_STANDING_MARKER, ULTRA_STANDING_PLAYBOOK } from '../src/prompts.js'
+import { latestModelSelection } from '../src/state.js'
 import { UltraModeController } from '../src/ultra.js'
 
 function fakeAgent(): { agent: Agent; session: Session } {
@@ -61,6 +62,20 @@ describe('UltraModeController', () => {
     const next = controller.onPreStep({ agent, messages: [], turn: 2, step: 1 })
     expect(next).toHaveLength(0)
     expect(controller.commandModeOn(agent)).toBe(false)
+  })
+
+  it('carries an Ultra default into a session with no selection event', () => {
+    const { agent, session } = fakeAgent()
+    const controller = new UltraModeController(resolveConfig(), () => ({
+      provider: 'deepseek-official',
+      model: 'mock',
+      reasoningEffort: 'ultra',
+    }))
+    controller.onCreated(agent)
+    expect(latestModelSelection(session.snapshotEvents())?.reasoningEffort).toBe('ultra')
+    const additions = controller.onPreStep({ agent, messages: [], turn: 1, step: 1 })
+    expect(additions).toHaveLength(1)
+    expect(JSON.stringify(additions[0])).toContain(ULTRA_STANDING_MARKER)
   })
 
   it('honors the effort-independent command mode', () => {

@@ -59,7 +59,15 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
   const runs = new Map<string, RunState>()
   const liveAgents = new Map<string, Agent>()
   const pause = new PauseController(settings, runs)
-  const ultra = new UltraModeController(settings)
+  const defaultSelection = (): { provider: string; model: string; reasoningEffort?: string } | undefined => {
+    const service = (ctx as unknown as {
+      get(name: string): unknown
+    }).get('agentDefaultModel') as {
+      currentSelection(): { provider: string; model: string; reasoningEffort?: string }
+    } | undefined
+    return service?.currentSelection()
+  }
+  const ultra = new UltraModeController(settings, defaultSelection)
   const selectMax = (agent: Agent): void => {
     const selection = latestModelSelection(agent.session.snapshotEvents())
     if (selection?.reasoningEffort !== 'ultra') return

@@ -2,7 +2,7 @@
 
 import { randomUUID } from 'node:crypto'
 import type { ContentBlock, UserMessage } from '@deepseek-ai/dsh-llm'
-import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import { appendPluginRecord, pluginRecordOf, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { maxDurationFor, maxRoundsFor, type ResolvedConfig } from './config.js'
 import type {
   AutopilotPhase,
@@ -106,10 +106,15 @@ export function fromRunEvent(event: AutopilotRunEvent, config: ResolvedConfig): 
   }
 }
 
-/** Append the current run state as a log-only event. */
+/** Plugin-record types: unknown readers skip them because the envelope is ignorable. */
+export const RUN_RECORD = 'plugin:ultracode/run' as const
+export const MODE_RECORD = 'plugin:ultracode/mode' as const
+export const PAUSE_RECORD = 'plugin:ultracode/pause' as const
+
+/** Append the current run state as an ignorable plugin record. */
 export function appendRunEvent(agent: SessionCarrier, run: RunState): void {
   run.updatedAt = Date.now()
-  agent.session.append('autopilot/run', {
+  appendPluginRecord(agent.session, RUN_RECORD, {
     runId: run.runId,
     skill: run.skill,
     phase: run.phase,
@@ -121,14 +126,14 @@ export function appendRunEvent(agent: SessionCarrier, run: RunState): void {
   })
 }
 
-/** Append the Ultra mode toggle as a log-only event. */
+/** Append the Ultra mode toggle as an ignorable plugin record. */
 export function appendModeEvent(
   agent: SessionCarrier,
   enabled: boolean,
   reason?: string,
   source?: UltracodeModeEvent['source'],
 ): void {
-  agent.session.append('ultracode/mode', {
+  appendPluginRecord(agent.session, MODE_RECORD, {
     enabled,
     ...reason === undefined ? {} : { reason },
     ...source === undefined ? {} : { source },
@@ -136,27 +141,43 @@ export function appendModeEvent(
   })
 }
 
-/** Append the pause state as a log-only event. */
+/** Append the pause state as an ignorable plugin record. */
 export function appendPauseEvent(agent: SessionCarrier, event: UltracodePauseEvent): void {
-  agent.session.append('ultracode/pause', event)
+  appendPluginRecord(agent.session, PAUSE_RECORD, event)
 }
 
-/** Read the newest run event from a session snapshot. */
+/** Read the newest run record from a session snapshot. */
 export function latestRunEvent(events: readonly SessionEvent[]): AutopilotRunEvent | undefined {
-  const event = lastEvent(events, candidate => candidate.type === 'autopilot/run')
-  return event?.type === 'autopilot/run' ? event.data : undefined
+  const event = lastEvent(events, candidate => recordData<AutopilotRunEvent>(candidate, RUN_RECORD, 'autopilot/run') !== undefined)
+  return event === undefined ? undefined : recordData<AutopilotRunEvent>(event, RUN_RECORD, 'autopilot/run')
 }
 
-/** Read the newest mode event from a session snapshot. */
+/** Read the newest mode record from a session snapshot. */
 export function latestModeEvent(events: readonly SessionEvent[]): UltracodeModeEvent | undefined {
-  const event = lastEvent(events, candidate => candidate.type === 'ultracode/mode')
-  return event?.type === 'ultracode/mode' ? event.data : undefined
+  const event = lastEvent(events, candidate => recordData<UltracodeModeEvent>(candidate, MODE_RECORD, 'ultracode/mode') !== undefined)
+  return event === undefined ? undefined : recordData<UltracodeModeEvent>(event, MODE_RECORD, 'ultracode/mode')
 }
 
-/** Read the newest pause event from a session snapshot. */
+/** Read the newest pause record and its sequence from a session snapshot. */
+export function latestPauseInfo(
+  events: readonly SessionEvent[],
+): { readonly data: UltracodePauseEvent; readonly seq: number } | undefined {
+  const event = lastEvent(events, candidate => recordData<UltracodePauseEvent>(candidate, PAUSE_RECORD, 'ultracode/pause') !== undefined)
+  if (event === undefined) return undefined
+  const data = recordData<UltracodePauseEvent>(event, PAUSE_RECORD, 'ultracode/pause')
+  return data === undefined ? undefined : { data, seq: event.seq }
+}
+
+/** Read the newest pause record from a session snapshot. */
 export function latestPauseEvent(events: readonly SessionEvent[]): UltracodePauseEvent | undefined {
-  const event = lastEvent(events, candidate => candidate.type === 'ultracode/pause')
-  return event?.type === 'ultracode/pause' ? event.data : undefined
+  return latestPauseInfo(events)?.data
+}
+
+function recordData<T>(event: SessionEvent, recordType: string, legacyType?: string): T | undefined {
+  const record = pluginRecordOf(event)
+  if (record?.type === recordType) return record.data as T
+  if (legacyType !== undefined && (event.type as string) === legacyType) return event.data as T
+  return undefined
 }
 
 /** Read the newest model selection event. */

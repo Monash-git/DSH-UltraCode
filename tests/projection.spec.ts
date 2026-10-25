@@ -3,20 +3,20 @@ import { describe, expect, it } from 'vitest'
 import { ultracodeProjectionDefinition as definition } from '../src/projection.js'
 
 function event(type: string, data: unknown): SessionEvent {
-  return { type, data, seq: 1, time: 0 } as unknown as SessionEvent
+  return { type, data, seq: 1, time: 0, ignorable: true } as unknown as SessionEvent
 }
 
 describe('ultracode projection', () => {
   it('folds pause, run, and mode into the client view', () => {
     let state = definition.init({} as never, 0 as never)
-    state = definition.apply(state, event('ultracode/pause', {
+    state = definition.apply(state, event('plugin:ultracode/pause', {
       paused: true,
       reason: 'user',
       turn: 3,
       atSeq: 7,
       updatedAt: 0,
     }))
-    state = definition.apply(state, event('autopilot/run', {
+    state = definition.apply(state, event('plugin:ultracode/run', {
       runId: 'run-1',
       skill: 'tdd',
       phase: 'paused_user',
@@ -25,7 +25,7 @@ describe('ultracode projection', () => {
       startedAt: 0,
       updatedAt: 0,
     }))
-    state = definition.apply(state, event('ultracode/mode', {
+    state = definition.apply(state, event('plugin:ultracode/mode', {
       enabled: true,
       updatedAt: 0,
     }))
@@ -43,7 +43,7 @@ describe('ultracode projection', () => {
 
   it('clears the pause and returns the same reference for unrelated events', () => {
     let state = definition.init({} as never, 0 as never)
-    state = definition.apply(state, event('ultracode/pause', {
+    state = definition.apply(state, event('plugin:ultracode/pause', {
       paused: true,
       reason: 'user',
       turn: 1,
@@ -52,7 +52,7 @@ describe('ultracode projection', () => {
     }))
     const unchanged = definition.apply(state, event('tool/call', {}))
     expect(unchanged).toBe(state)
-    state = definition.apply(state, event('ultracode/pause', {
+    state = definition.apply(state, event('plugin:ultracode/pause', {
       paused: false,
       reason: 'resumed',
       turn: 1,

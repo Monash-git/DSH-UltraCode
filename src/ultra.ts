@@ -39,11 +39,15 @@ export class UltraModeController {
   private readonly active = new Set<string>()
   private readonly forceFullPlaybook = new Set<string>()
 
-  constructor(private readonly config: ResolvedConfig) {}
+  constructor(
+    private readonly config: ResolvedConfig,
+    private readonly defaultSelection?: () => { provider: string; model: string; reasoningEffort?: string } | undefined,
+  ) {}
 
   /** Load the command mode and current activation view for one agent. */
   onCreated(agent: Agent): void {
     if (!isRootAgent(agent)) return
+    this.ensureDefaultSelection(agent)
     const key = sessionKey(agent)
     const mode = latestModeEvent(agent.session.snapshotEvents())
     if (mode?.source === 'command') {
@@ -56,12 +60,34 @@ export class UltraModeController {
 
   /** Whether the model selection currently says `ultra`. */
   isSelectorUltra(agent: Agent): boolean {
-    return latestModelSelection(agent.session.snapshotEvents())?.reasoningEffort === 'ultra'
+    const selection = latestModelSelection(agent.session.snapshotEvents())
+    if (selection !== undefined) return selection.reasoningEffort === 'ultra'
+    return this.defaultSelection?.()?.reasoningEffort === 'ultra'
   }
 
   /** Read the selected effort, for status output. */
   selectedEffort(agent: Agent): string | undefined {
     return latestModelSelection(agent.session.snapshotEvents())?.reasoningEffort
+      ?? this.defaultSelection?.()?.reasoningEffort
+  }
+
+  /**
+   * Carry an Ultra default into a session that has no selection event. DSH's
+   * blank draft keeps the selector choice client-side; the session created on
+   * the first send otherwise starts without it and the request header (max)
+   * makes the UI fall back to Max.
+   */
+  private ensureDefaultSelection(agent: Agent): void {
+    if (latestModelSelection(agent.session.snapshotEvents()) !== undefined) return
+    const selection = this.defaultSelection?.()
+    if (selection?.reasoningEffort !== 'ultra') return
+    ;(agent.session as unknown as {
+      append(type: string, data: unknown): unknown
+    }).append('model/selection', {
+      provider: selection.provider,
+      model: selection.model,
+      reasoningEffort: 'ultra',
+    })
   }
 
   /** Enable or disable the effort-independent command mode. */
@@ -94,6 +120,7 @@ export class UltraModeController {
   onPreStep(payload: UltraPreStep): UserMessage[] {
     const { agent } = payload
     if (!isRootAgent(agent)) return []
+    this.ensureDefaultSelection(agent)
     const key = sessionKey(agent)
     const selector = this.isSelectorUltra(agent)
     const command = this.commandMode.has(key)

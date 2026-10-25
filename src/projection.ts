@@ -1,11 +1,15 @@
 /** The `ultracode` session projection consumed by the composer play control. */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { pluginRecordOf, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-projection'
 import { z } from 'zod'
+import { MODE_RECORD, PAUSE_RECORD, RUN_RECORD } from './state.js'
 import type {
+  AutopilotRunEvent,
   ProjectionRun,
+  UltracodeModeEvent,
+  UltracodePauseEvent,
   UltracodeProjectionState,
   UltracodeProjectionView,
 } from './types.js'
@@ -49,29 +53,34 @@ export const ultracodeProjectionDefinition = {
     mode: 'off',
   }),
   apply: (state: UltracodeProjectionState, event: SessionEvent): UltracodeProjectionState => {
-    if (event.type === 'ultracode/pause') {
-      const pause = event.data.paused
+    const record = pluginRecordOf(event)
+    const type = record?.type ?? (event.type as string)
+    if (type === PAUSE_RECORD || type === 'ultracode/pause') {
+      const data = (record?.data ?? event.data) as UltracodePauseEvent
+      const pause = data.paused
         ? {
             paused: true as const,
-            reason: event.data.reason,
-            turn: event.data.turn,
-            atSeq: event.data.atSeq,
+            reason: data.reason,
+            turn: data.turn,
+            atSeq: data.atSeq,
           }
         : null
       return { ...state, pause }
     }
-    if (event.type === 'autopilot/run') {
+    if (type === RUN_RECORD || type === 'autopilot/run') {
+      const data = (record?.data ?? event.data) as AutopilotRunEvent
       const run: ProjectionRun = {
-        runId: event.data.runId,
-        skill: event.data.skill,
-        phase: event.data.phase,
-        round: event.data.round,
-        maxRounds: event.data.maxRounds,
+        runId: data.runId,
+        skill: data.skill,
+        phase: data.phase,
+        round: data.round,
+        maxRounds: data.maxRounds,
       }
       return { ...state, run }
     }
-    if (event.type === 'ultracode/mode') {
-      const mode = event.data.enabled ? 'on' as const : 'off' as const
+    if (type === MODE_RECORD || type === 'ultracode/mode') {
+      const data = (record?.data ?? event.data) as UltracodeModeEvent
+      const mode = data.enabled ? 'on' as const : 'off' as const
       if (state.mode === mode) return state
       return { ...state, mode }
     }

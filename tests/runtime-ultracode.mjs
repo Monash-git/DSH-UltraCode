@@ -44,7 +44,7 @@ const pkg = path => new URL(`@deepseek-ai/${path}`, RUNTIME).href
 
 const { Context } = await import(pkg('cordis/lib/index.js'))
 const llm = await import(pkg('dsh-llm/lib/index.js'))
-const { SessionId } = await import(pkg('dsh-session/lib/index.js'))
+const { SessionId, pluginRecordOf } = await import(pkg('dsh-session/lib/index.js'))
 const { default: Session } = await import(pkg('dsh-session/lib/index.js'))
 const { default: SystemPrompt } = await import(pkg('dsh-system-prompt/lib/index.js'))
 const { default: ToolRuntime, defineTool } = await import(pkg('dsh-tools/lib/index.js'))
@@ -230,10 +230,22 @@ function withTimeout(promise, label) {
   return Promise.race([promise, timeout])
 }
 
+function pluginData(event, type) {
+  const record = pluginRecordOf(event)
+  return record?.type === type ? record.data : undefined
+}
+
 function runPhases(agent) {
   return agent.session.snapshotEvents()
-    .filter(event => event.type === 'autopilot/run')
-    .map(event => event.data.phase)
+    .map(event => pluginData(event, 'plugin:ultracode/run'))
+    .filter(Boolean)
+    .map(data => data.phase)
+}
+
+function pauseRecords(agent) {
+  return agent.session.snapshotEvents()
+    .map(event => pluginData(event, 'plugin:ultracode/pause'))
+    .filter(Boolean)
 }
 
 function assertCacheStable(firstRequest, secondRequest, events) {
@@ -353,8 +365,8 @@ async function scenarioPauseResume() {
     assert.ok(pause, 'the pause command should be registered')
     h.wait.release()
     await withTimeout(h.agent.whenIdle(), 'pause settle')
-    const pauseEvents = h.agent.session.snapshotEvents().filter(event => event.type === 'ultracode/pause')
-    assert.ok(pauseEvents.some(event => event.data.paused === true), 'the session should be paused')
+    const pauseEvents = pauseRecords(h.agent)
+    assert.ok(pauseEvents.some(data => data.paused === true), 'the session should be paused')
     assert.ok(!runPhases(h.agent).length, 'the normal turn should not create a run')
 
     const resume = await h.ctx.commands.execute(h.agent, '/resume', [], new AbortController().signal)
@@ -366,10 +378,8 @@ async function scenarioPauseResume() {
       'a normal paused session should receive the generic resume prompt',
     )
     assertCacheStable(h.adapter.requests[0], h.adapter.requests[1], h.agent.session.snapshotEvents())
-    const cleared = h.agent.session.snapshotEvents()
-      .filter(event => event.type === 'ultracode/pause')
-      .at(-1)
-    assert.equal(cleared?.data.paused, false, 'resume should clear the durable pause')
+    const cleared = pauseRecords(h.agent).at(-1)
+    assert.equal(cleared?.paused, false, 'resume should clear the durable pause')
     return { scenario: 'pause-resume', requests: h.adapter.requests.length }
   } finally {
     await h.handle.dispose()
@@ -409,7 +419,7 @@ async function scenarioQuestion() {
     h.agent.followup(user('/tdd'))
     await withTimeout(h.agent.whenIdle(), 'question first stop')
     assert.ok(runPhases(h.agent).includes('waiting_user'), 'the run should wait for the user')
-    assert.ok(!h.agent.session.snapshotEvents().some(event => event.type === 'ultracode/pause' && event.data.paused === true), 'a question is not the play-button pause')
+    assert.ok(!pauseRecords(h.agent).some(data => data.paused === true), 'a question is not the play-button pause')
 
     h.agent.followup(user('Change src/example.ts'))
     await withTimeout(h.agent.whenIdle(), 'question answer')
@@ -433,7 +443,7 @@ async function scenarioAutopilotPause() {
     h.wait.release()
     await withTimeout(h.agent.whenIdle(), 'autopilot pause settle')
     assert.ok(runPhases(h.agent).includes('paused_user'), 'the run should be paused_user')
-    assert.ok(h.agent.session.snapshotEvents().some(event => event.type === 'ultracode/pause' && event.data.paused === true))
+    assert.ok(pauseRecords(h.agent).some(data => data.paused === true))
 
     const resumed = await h.ctx.commands.execute(h.agent, '/resume', [], new AbortController().signal)
     assert.ok(resumed, 'the resume command should be registered')
