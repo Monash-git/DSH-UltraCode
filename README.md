@@ -38,6 +38,25 @@ The setting is **Settings → General → Send behavior while busy**.
 The plugin does not implement a second queue. At `agent/turn-stopping` it
 skips the autopilot continuation when the inbox already contains user work.
 
+## Turn yield
+
+When an autopilot run's model stops and the only remaining dependency is a
+running background job owned by the root session, the run enters `waiting_job`
+and the turn ends without a continuation nudge. A job completion notice then
+opens a new turn in the same session, the run returns to `running`, and the
+round counter advances. A pending user message or a model question wins over a
+job wake: the run waits for the human instead. Jobs that are `stopping` or
+unowned do not count.
+
+The run's duration budget counts active time only; `waiting_job`,
+`waiting_user`, and paused time are excluded. Round and duration caps still
+apply, and a run at a cap wraps up instead of yielding into an uncounted turn.
+
+Turn yield relies on `tool-jobs` completing an idle owner with `wakeup`
+delivery and an unspent `maxConsecutiveWakes` budget. A settlement that lands
+in the driver's retirement window can still strand its notice until the next
+user input; that race belongs to DSH's agent loop.
+
 ## Pause/play
 
 The composer activity seat shows a pause button while a root session is
@@ -89,7 +108,10 @@ invariants with a mock adapter.
   saved workflows, per-agent effort/isolation/agentType, or worktree isolation.
 - DSH has no Claude-style usage-limit pause; Ultra can spend more tokens.
 - Background workflow jobs are jobs, not autopilot; pausing the agent does not
-  cancel a running job.
+  cancel a running job. Pausing while a run waits on a job records the pause,
+  but DSH still delivers the job's completion wake; there is no wake gate yet.
+- The plugin detects a live job through the optional `ctx.jobs` service. If the
+  composition omits it, turn yield simply does not trigger.
 - The client bundle is built as a DSH client module. If a packaged Desktop
   build rejects third-party client bundles, the Host pause/resume commands
   remain available; do not patch `app.asar`.

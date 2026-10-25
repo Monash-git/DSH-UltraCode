@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { controlView } from '../src/client/view.js'
+import { controlView, waitingOnJob } from '../src/client/view.js'
 
 describe('composer play/pause view-model', () => {
   it('shows pause while the agent is running', () => {
@@ -21,5 +21,13 @@ describe('composer play/pause view-model', () => {
     expect(controlView({ running: false, ultra: { run: { phase: 'waiting_user' } } })).toBe('hidden')
     expect(controlView({ running: false, ultra: { run: { phase: 'completed' } } })).toBe('hidden')
     expect(controlView({ running: false, ultra: { run: { phase: 'cancelled' } } })).toBe('hidden')
+  })
+
+  it('keeps pause available and exposes the waiting-on-job state', () => {
+    const snapshot = { running: false, ultra: { run: { phase: 'waiting_job' } } }
+    expect(controlView(snapshot)).toBe('pause')
+    expect(waitingOnJob(snapshot)).toBe(true)
+    expect(waitingOnJob({ running: true, ultra: { run: { phase: 'running' } } })).toBe(false)
+    expect(waitingOnJob({ running: false, ultra: undefined })).toBe(false)
   })
 })

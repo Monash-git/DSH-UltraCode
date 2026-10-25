@@ -34,6 +34,7 @@ import {
 import { installBusyEnterDefault } from './steering.js'
 import { TaskStateController } from './task-state.js'
 import {
+  activeElapsedMs,
   appendRunEvent,
   createRunState,
   fromRunEvent,
@@ -44,9 +45,13 @@ import {
   latestModelSelection,
   latestRunEvent,
   latestTodos,
+  liveOwnedJob,
+  markRunWaiting,
   progressDigest,
+  resumeRunActive,
   sessionKey,
   todoSummary,
+  type JobRegistryLike,
   type RunState,
 } from './state.js'
 import { UltraModeController } from './ultra.js'
@@ -70,6 +75,8 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
   }
   const ultra = new UltraModeController(settings, defaultSelection)
   const taskState = new TaskStateController()
+  const jobs = (): JobRegistryLike | undefined =>
+    (ctx as unknown as { get(name: string): unknown }).get('jobs') as JobRegistryLike | undefined
   const selectMax = (agent: Agent): void => {
     const selection = latestModelSelection(agent.session.snapshotEvents())
     if (selection?.reasoningEffort !== 'ultra') return
@@ -120,8 +127,17 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
     const event = latestRunEvent(agent.session.snapshotEvents())
     if (event !== undefined) runs.set(key, fromRunEvent(event, settings))
     else runs.delete(key)
+    const restored = runs.get(key)
+    if (restored !== undefined
+      && (restored.phase === 'waiting_job'
+        || restored.phase === 'waiting_user'
+        || restored.phase === 'paused_user'
+        || restored.phase === 'paused_resume')) {
+      markRunWaiting(restored)
+    }
     if (live) pause.hydrate(agent)
     else pause.onCreated(agent)
+    if (restored !== undefined && pause.isPaused(agent)) markRunWaiting(restored)
     ultra.onCreated(agent)
     if (pause.isPaused(agent) || runs.get(key)?.phase === 'paused_resume') {
       ultra.requestFullPlaybook(agent)
@@ -213,12 +229,24 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
           run.phase = 'running'
           appendRunEvent(agent, run)
         }
+      } else if (current !== undefined && current.phase === 'waiting_job' && messages.length > 0) {
+        // A completion notice, a user message, or any other admitted input
+        // wakes the run. The wake is a yield/resume cycle, so it counts.
+        resumeRunActive(current)
+        current.round += 1
+        current.phase = 'running'
+        // The waiting reason is not remaining work; the model's next answer
+        // and continuation nudge must not treat it as such.
+        delete current.reason
+        appendRunEvent(agent, current)
       } else if (
         current !== undefined
         && (current.phase === 'waiting_user' || current.phase === 'paused_resume')
         && hasUserMessage(messages)
       ) {
+        resumeRunActive(current)
         current.phase = 'running'
+        delete current.reason
         appendRunEvent(agent, current)
       }
 
@@ -248,6 +276,28 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
 
       if (lastAssistantEndsWithQuestion(agent)) {
         run.phase = 'waiting_user'
+        run.reason = 'waiting for user answer'
+        markRunWaiting(run)
+        appendRunEvent(agent, run)
+        return
+      }
+
+      const job = liveOwnedJob(jobs(), agent.session.id)
+      if (job !== undefined) {
+        // A run at a cap must not yield into an uncounted turn.
+        if (run.round >= run.maxRounds) {
+          wrapUp(agent, run, 'round limit')
+          return
+        }
+        if (activeElapsedMs(run) >= run.maxDurationMs) {
+          wrapUp(agent, run, 'time limit')
+          return
+        }
+        run.phase = 'waiting_job'
+        run.reason = typeof job.id === 'string'
+          ? `waiting for background job ${job.id}`
+          : 'waiting for background job'
+        markRunWaiting(run)
         appendRunEvent(agent, run)
         return
       }
@@ -256,7 +306,7 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
         wrapUp(agent, run, 'round limit')
         return
       }
-      if (Date.now() - run.startedAt >= run.maxDurationMs) {
+      if (activeElapsedMs(run) >= run.maxDurationMs) {
         wrapUp(agent, run, 'time limit')
         return
       }

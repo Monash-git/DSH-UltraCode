@@ -41,6 +41,24 @@ describe('ultracode projection', () => {
     expect(definition.wire.viewSchema.parse(view)).toEqual(view)
   })
 
+  it('carries the waiting-on-job phase to the client view', () => {
+    let state = definition.init({} as never, 0 as never)
+    state = definition.apply(state, event('plugin:ultracode/run', {
+      runId: 'run-2',
+      skill: 'implement',
+      phase: 'waiting_job',
+      round: 3,
+      maxRounds: 120,
+      startedAt: 0,
+      updatedAt: 0,
+      reason: 'waiting for background job',
+    }))
+
+    const view = definition.wire.view(state)
+    expect(view.run?.phase).toBe('waiting_job')
+    expect(definition.wire.viewSchema.parse(view)).toEqual(view)
+  })
+
   it('clears the pause and returns the same reference for unrelated events', () => {
     let state = definition.init({} as never, 0 as never)
     state = definition.apply(state, event('plugin:ultracode/pause', {

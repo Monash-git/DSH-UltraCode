@@ -41,3 +41,22 @@ describe('reply-first prompt assets', () => {
     expectReplyFirst(continuationNudge('tdd', 2, 20, '1 completed, 1 open', 'tests'))
   })
 })
+
+describe('background-job prompt contract', () => {
+  function expectBackgroundJobRule(text: string): void {
+    expect(text).toMatch(/background job/i)
+    expect(text).toMatch(/valid stop/i)
+    expect(text).toMatch(/job_output/)
+    expect(text).toMatch(/wait: ?true/i)
+    expect(text).toMatch(/job_kill/)
+    expect(text).toMatch(/independent work/i)
+  }
+
+  it('makes a live job a valid stop in the autopilot banner', () => {
+    expectBackgroundJobRule(autopilotBanner('tdd', 1, 20))
+  })
+
+  it('keeps the contract in every continuation nudge', () => {
+    expectBackgroundJobRule(continuationNudge('tdd', 2, 20, '1 completed, 1 open', 'tests'))
+  })
+})

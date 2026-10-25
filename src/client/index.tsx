@@ -7,7 +7,7 @@
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import en from '../../locale/en.json' with { type: 'json' }
 import zh from '../../locale/zh.json' with { type: 'json' }
-import { controlView, EMPTY, type Snapshot, type UltraView } from './view.js'
+import { controlView, EMPTY, waitingOnJob, type Snapshot, type UltraView } from './view.js'
 
 interface ProjectionStore<T> {
   getSnapshot(): T
@@ -146,9 +146,12 @@ function Control(props: ControlProps): JSX.Element | null {
   const view = controlView(snapshot)
   if (view === 'hidden') return null
 
+  const waiting = waitingOnJob(snapshot)
+  const waitingLabel = waiting ? (t?.('waitingJob') ?? en.waitingJob) : undefined
   const label = view === 'play'
     ? (t?.('resume') ?? en.resume)
     : (t?.('pause') ?? en.pause)
+  const accessibleLabel = waitingLabel === undefined ? label : `${label} — ${waitingLabel}`
   const disabled = locked || pending
 
   const onClick = async (): Promise<void> => {
@@ -168,8 +171,8 @@ function Control(props: ControlProps): JSX.Element | null {
     <span style={{ display: 'inline-flex', alignItems: 'center' }}>
       <button
         type="button"
-        aria-label={label}
-        title={label}
+        aria-label={accessibleLabel}
+        title={accessibleLabel}
         disabled={disabled}
         onClick={() => { void onClick() }}
         style={{
@@ -189,6 +192,14 @@ function Control(props: ControlProps): JSX.Element | null {
       >
         {view === 'play' ? <PlayIcon /> : <PauseIcon />}
       </button>
+      {waitingLabel === undefined ? null : (
+        <span
+          role="status"
+          style={{ marginLeft: 6, fontSize: 11, color: 'var(--dsw-alias-label-secondary)' }}
+        >
+          {waitingLabel}
+        </span>
+      )}
       {error === undefined ? null : (
         <span role="status" style={{ fontSize: 11, color: 'var(--dsw-alias-state-error-primary)' }}>
           {error}

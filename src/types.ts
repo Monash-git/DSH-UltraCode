@@ -7,6 +7,7 @@ export type AutopilotPhase =
   | 'armed'
   | 'running'
   | 'waiting_user'
+  | 'waiting_job'
   | 'paused_user'
   | 'paused_resume'
   | 'completed'

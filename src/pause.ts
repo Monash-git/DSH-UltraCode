@@ -19,7 +19,9 @@ import {
   lastSeq,
   latestPauseInfo,
   latestTurnEnd,
+  markRunWaiting,
   openTurn,
+  resumeRunActive,
   sessionKey,
   todoSummary,
   type RunState,
@@ -67,6 +69,8 @@ export class PauseController {
       return
     }
     if (run !== undefined && isUnfinishedPhase(run.phase)) {
+      // Downtime between processes is not active time for the run.
+      markRunWaiting(run)
       run.phase = 'paused_resume'
       run.reason = 'session restarted'
       appendRunEvent(agent, run)
@@ -124,7 +128,11 @@ export class PauseController {
     const turn = openTurn(agent) || latestTurnEnd(agent.session.snapshotEvents())?.turn || 0
     this.markPaused(agent, 'user', turn)
     const run = this.runs.get(key)
-    if (run !== undefined && (run.phase === 'running' || run.phase === 'armed')) {
+    if (run !== undefined
+      && (run.phase === 'running' || run.phase === 'armed' || run.phase === 'waiting_job')) {
+      // Paused time is not active time, whether the run was working or idle
+      // while waiting for a background job.
+      markRunWaiting(run)
       run.phase = 'paused_user'
       run.reason = 'paused by user'
       appendRunEvent(agent, run)
@@ -164,6 +172,7 @@ export class PauseController {
         run.reason = previous.reason
         return { ok: false, text: `Unable to resume the run: ${error instanceof Error ? error.message : String(error)}` }
       }
+      resumeRunActive(run)
       run.round = nextRound
       run.phase = 'running'
       run.reason = 'resumed by user'
@@ -182,6 +191,7 @@ export class PauseController {
     } catch (error: unknown) {
       return { ok: false, text: `Unable to resume the session: ${error instanceof Error ? error.message : String(error)}` }
     }
+    if (run !== undefined) resumeRunActive(run)
     this.clear(agent, 'resumed')
     return { ok: true, text: 'Session resumed.' }
   }
@@ -206,7 +216,8 @@ export class PauseController {
     if (this.paused.has(sessionKey(agent))) return
     this.markPaused(agent, 'error', turn)
     const run = this.runs.get(sessionKey(agent))
-    if (run !== undefined && run.phase === 'running') {
+    if (run !== undefined && (run.phase === 'running' || run.phase === 'waiting_job')) {
+      markRunWaiting(run)
       run.phase = 'paused_user'
       run.reason = 'turn error'
       appendRunEvent(agent, run)
@@ -224,7 +235,8 @@ export class PauseController {
     if (signal.aborted) {
       if (!this.paused.has(key)) this.markPaused(agent, 'user', turn)
       const run = this.runs.get(key)
-      if (run !== undefined && run.phase === 'running') {
+      if (run !== undefined && (run.phase === 'running' || run.phase === 'waiting_job')) {
+        markRunWaiting(run)
         run.phase = 'paused_user'
         run.reason = 'turn interrupted'
         appendRunEvent(agent, run)

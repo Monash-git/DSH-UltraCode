@@ -108,6 +108,23 @@ describe('/autopilot command', () => {
     if (result.kind === 'success') expect(result.text).toContain('No active autopilot run')
   })
 
+  it('shows that a waiting job is why the run is idle', () => {
+    const { agent } = fakeAgent()
+    const run = createRunState('tdd', resolveConfig())
+    run.phase = 'waiting_job'
+    run.reason = 'waiting for background job'
+    const runs = new Map([[sessionKey(agent), run]])
+    const { context } = fakeContext({ runs })
+
+    const result = handleAutopilotCommand(agent, 'status', context)
+
+    expect(result.kind).toBe('success')
+    if (result.kind === 'success') {
+      expect(result.text).toContain('waiting_job')
+      expect(result.text).toMatch(/waiting for a background job/i)
+    }
+  })
+
   it('cancels an active run and asks the pause controller to keep inbox work', () => {
     const { agent } = fakeAgent()
     const run = createRunState('wayfinder', resolveConfig())

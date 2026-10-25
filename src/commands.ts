@@ -26,8 +26,11 @@ export function handleAutopilotCommand(
   const run = context.runs.get(key)
 
   if (input === '' || input === 'status') {
+    const runStatus = run === undefined
+      ? 'No active autopilot run.'
+      : `Autopilot ${run.skill}: ${run.phase}${run.phase === 'waiting_job' ? ' (waiting for a background job)' : ''}, round ${run.round}/${run.maxRounds}.`
     const parts = [
-      run === undefined ? 'No active autopilot run.' : `Autopilot ${run.skill}: ${run.phase}, round ${run.round}/${run.maxRounds}.`,
+      runStatus,
       `Ultra mode: ${context.ultra.isSelectorUltra(agent) || context.ultra.commandModeOn(agent) ? 'on' : 'off'}.`,
       ...context.pause.isPaused(agent) ? [`Paused: ${context.pause.reasonOf(agent) ?? 'unknown'}.`] : [],
     ]

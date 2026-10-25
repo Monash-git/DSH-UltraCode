@@ -2,5 +2,6 @@
   "pause": "Pause",
   "resume": "Resume",
   "paused": "Paused",
-  "running": "Running"
+  "running": "Running",
+  "waitingJob": "Waiting for background job"
 }

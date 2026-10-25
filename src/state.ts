@@ -25,6 +25,31 @@ export interface InboxCarrier {
   }
 }
 
+/** The subset of one background job the turn-yield check reads. */
+export interface JobViewLike {
+  readonly id?: unknown
+  readonly owner?: unknown
+  readonly status: string
+}
+
+/** The subset of the optional `ctx.jobs` service the plugin depends on. */
+export interface JobRegistryLike {
+  list(caller?: unknown): readonly JobViewLike[]
+}
+
+/**
+ * The first `running` job owned by this session. `stopping` jobs settle as
+ * killed and deliberately send no completion notice, and unowned jobs wake
+ * nobody, so yielding on either would strand the run.
+ */
+export function liveOwnedJob(
+  registry: JobRegistryLike | undefined,
+  owner: unknown,
+): JobViewLike | undefined {
+  if (registry === undefined) return undefined
+  return registry.list(owner).find(job => job.owner === owner && job.status === 'running')
+}
+
 /** Live state for one autopilot run. */
 export interface RunState {
   runId: string
@@ -38,6 +63,10 @@ export interface RunState {
   reason?: string
   noProgressDigest?: string
   noProgressCount: number
+  /** Non-active milliseconds accumulated after earlier waiting spans. */
+  inactiveMs: number
+  /** When the current waiting span began; absent while the run is active. */
+  inactiveSince?: number
 }
 
 /** One todo item as written by the todo tool. */
@@ -87,6 +116,7 @@ export function createRunState(
     startedAt: now,
     updatedAt: now,
     noProgressCount: 0,
+    inactiveMs: 0,
   }
 }
 
@@ -103,7 +133,29 @@ export function fromRunEvent(event: AutopilotRunEvent, config: ResolvedConfig): 
     updatedAt: event.updatedAt,
     ...event.reason === undefined ? {} : { reason: event.reason },
     noProgressCount: 0,
+    inactiveMs: 0,
   }
+}
+
+/**
+ * Stop the active-duration clock. Waiting for a background job, waiting for
+ * the user, and a paused run do not spend the run's duration budget.
+ */
+export function markRunWaiting(run: RunState, now = Date.now()): void {
+  if (run.inactiveSince === undefined) run.inactiveSince = now
+}
+
+/** Resume the active-duration clock and accumulate the span just ended. */
+export function resumeRunActive(run: RunState, now = Date.now()): void {
+  if (run.inactiveSince === undefined) return
+  run.inactiveMs += Math.max(0, now - run.inactiveSince)
+  run.inactiveSince = undefined
+}
+
+/** Elapsed active time: wall clock minus every waiting or paused span. */
+export function activeElapsedMs(run: RunState, now = Date.now()): number {
+  const currentWait = run.inactiveSince === undefined ? 0 : Math.max(0, now - run.inactiveSince)
+  return Math.max(0, now - run.startedAt - run.inactiveMs - currentWait)
 }
 
 /** Plugin-record types: unknown readers skip them because the envelope is ignorable. */
@@ -238,6 +290,7 @@ export function isUnfinishedPhase(phase: AutopilotPhase): boolean {
   return phase === 'armed'
     || phase === 'running'
     || phase === 'waiting_user'
+    || phase === 'waiting_job'
     || phase === 'paused_user'
     || phase === 'paused_resume'
 }

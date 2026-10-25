@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import type { TodoItem } from '../src/state.js'
 import { resolveConfig } from '../src/config.js'
 import {
+  activeElapsedMs,
   appendModeEvent,
   appendRunEvent,
   createRunState,
@@ -16,7 +17,9 @@ import {
   latestModelSelection,
   latestPauseEvent,
   latestRunEvent,
+  markRunWaiting,
   openTurn,
+  resumeRunActive,
   sessionKey,
   type SessionCarrier,
 } from '../src/state.js'
@@ -133,12 +136,32 @@ describe('run state', () => {
     expect(isUnfinishedPhase('armed')).toBe(true)
     expect(isUnfinishedPhase('running')).toBe(true)
     expect(isUnfinishedPhase('waiting_user')).toBe(true)
+    expect(isUnfinishedPhase('waiting_job')).toBe(true)
     expect(isUnfinishedPhase('paused_user')).toBe(true)
     expect(isUnfinishedPhase('paused_resume')).toBe(true)
     expect(isUnfinishedPhase('completed')).toBe(false)
     expect(isUnfinishedPhase('exhausted')).toBe(false)
     expect(isUnfinishedPhase('cancelled')).toBe(false)
     expect(isUnfinishedPhase('error')).toBe(false)
+  })
+
+  it('measures active time with waiting and paused spans excluded', () => {
+    const run = createRunState('tdd', resolveConfig())
+    run.startedAt = 1_000
+    expect(activeElapsedMs(run, 6_000)).toBe(5_000)
+
+    markRunWaiting(run, 2_000)
+    expect(activeElapsedMs(run, 10_000)).toBe(1_000)
+
+    resumeRunActive(run, 10_000)
+    expect(run.inactiveMs).toBe(8_000)
+    expect(activeElapsedMs(run, 12_000)).toBe(3_000)
+
+    markRunWaiting(run, 12_000)
+    expect(activeElapsedMs(run, 20_000)).toBe(3_000)
+
+    resumeRunActive(run, 20_000)
+    expect(activeElapsedMs(run, 21_000)).toBe(4_000)
   })
 
   it('reads the latest model selection and open turn', () => {

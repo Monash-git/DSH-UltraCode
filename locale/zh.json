@@ -2,5 +2,6 @@
   "pause": "暂停",
   "resume": "继续",
   "paused": "已暂停",
-  "running": "运行中"
+  "running": "运行中",
+  "waitingJob": "正在等待后台任务"
 }

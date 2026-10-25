@@ -22,6 +22,12 @@ Any multi-step task: keep the todo list current. When the plan changes — a tas
 export const REPLY_FIRST_RULE = 'Reply first: a direct user question, including a progress question, is answered in the same step before any new diagnostic. Asking for progress does not stop the run; answer, then continue.'
 
 /**
+ * The background-job contract shared by the autopilot assets. A live job the
+ * run still needs is a valid stop; its completion notice wakes a new turn.
+ */
+export const BACKGROUND_JOB_RULE = 'A relevant background job that is still running is a valid stop: stop the turn and let its completion notice resume the run. Do not call job_output with wait:true to sleep; kill jobs you no longer need with job_kill, and do independent work while a job runs.'
+
+/**
  * The full Ultra standing playbook, injected when the mode arms, after a
  * resume, and after compaction. Selecting Ultra is the explicit workflow ask.
  */
@@ -63,7 +69,8 @@ export function autopilotBanner(skill: string, round: number, max: number): stri
 This is a one-shot DSH autopilot run. Do not stop after one step or one ticket. Continue until the skill's destination is reached. The only valid stops are:
 - you need a requirement-alignment answer: call ask_user_question;
 - the work is complete and verified: call complete_run;
-- you are blocked: call complete_run with blocked set to the blocker.
+- you are blocked: call complete_run with blocked set to the blocker;
+- you are waiting on a background job you still need: stop the turn and yield to its completion notice. Do not call job_output with wait:true to sleep; kill jobs you no longer need with job_kill, and do independent work while a job runs.
 Do not ask the user to re-run the command. Do not implement beyond the skill's destination.
 ${REPLY_FIRST_RULE}
 </autopilot_run>`
@@ -80,6 +87,7 @@ export function continuationNudge(
   return `<autopilot_continue skill="${escapeAttribute(skill)}" round="${round}" max="${max}">
 Continue the run. Current todos: ${todoSummary}. Remaining work: ${remaining}.
 Do not stop until complete; call complete_run when done, or ask_user_question if you need a decision.
+${BACKGROUND_JOB_RULE}
 ${REPLY_FIRST_RULE}
 </autopilot_continue>`
 }

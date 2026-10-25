@@ -42,7 +42,7 @@ await cp(join(SKILLS_ROOT, 'skills'), join(SKILLS_COPY_ROOT, 'skills'), { recurs
 
 const pkg = path => new URL(`@deepseek-ai/${path}`, RUNTIME).href
 
-const { Context } = await import(pkg('cordis/lib/index.js'))
+const { Context, Service } = await import(pkg('cordis/lib/index.js'))
 const llm = await import(pkg('dsh-llm/lib/index.js'))
 const { SessionId, pluginRecordOf } = await import(pkg('dsh-session/lib/index.js'))
 const { default: Session } = await import(pkg('dsh-session/lib/index.js'))
@@ -154,6 +154,55 @@ function createWaitTool() {
   return { tool, started, release: () => releaseResolve() }
 }
 
+/**
+ * Minimal ctx.jobs stand-in for turn-yield scenarios. The plugin only needs
+ * `list(caller)` and the same owner isolation the real registry provides.
+ */
+class FakeJobs extends Service {
+  constructor(ctx, state) {
+    super(ctx, 'jobs')
+    this.state = state
+  }
+
+  list(caller) {
+    return this.state.views.filter(view => view.owner === undefined || view.owner === caller)
+  }
+}
+
+function createJobsState() {
+  const views = []
+  let nextId = 0
+  return {
+    views,
+    live(owner, label = 'fake workflow') {
+      const view = {
+        id: `job-${nextId += 1}`,
+        kind: 'workflow',
+        label,
+        owner,
+        status: 'running',
+        startedAt: Date.now(),
+        output: { total: 0, earliest: 0 },
+      }
+      views.push(view)
+      return view
+    },
+    settle(view, status = 'completed') {
+      view.status = status
+    },
+  }
+}
+
+function completionNotice(id, status = 'completed') {
+  return createUserMessage({
+    content: [{
+      type: 'text',
+      text: `background job ${id} (workflow: fake workflow) finished [status: ${status}]. Read its output with job_output.`,
+    }],
+    source: { kind: 'tool-jobs', form: 'notice' },
+  })
+}
+
 function createWorkflowTool() {
   const calls = []
   const tool = defineTool({
@@ -195,6 +244,11 @@ async function createHarness(script, options = {}) {
   await ctx.plugin(SkillRegistry)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(AgentLoop, { agents: [] })
+  let jobs
+  if (options.jobsService === true) {
+    jobs = createJobsState()
+    await ctx.plugin(FakeJobs, jobs)
+  }
   let ultraFiber
   if (options.plugins !== 'skills') {
     if (options.defaultModel !== undefined) {
@@ -253,7 +307,7 @@ async function createHarness(script, options = {}) {
     },
   })
   await new Promise(resolve => setTimeout(resolve, 10))
-  return { ctx, adapter, agent: handle.agent, handle, wait, workflow, ultraFiber, skillReads }
+  return { ctx, adapter, agent: handle.agent, handle, wait, workflow, ultraFiber, skillReads, jobs }
 }
 
 function user(text) {
@@ -281,6 +335,13 @@ function pauseRecords(agent) {
   return agent.session.snapshotEvents()
     .map(event => pluginData(event, 'plugin:ultracode/pause'))
     .filter(Boolean)
+}
+
+function latestRun(agent) {
+  return agent.session.snapshotEvents()
+    .map(event => pluginData(event, 'plugin:ultracode/run'))
+    .filter(Boolean)
+    .at(-1)
 }
 
 const TASK_STATE_MARKER = '[ultracode:task-state]'
@@ -707,6 +768,228 @@ async function scenarioQuestion() {
   }
 }
 
+async function scenarioTurnYield() {
+  const h = await createHarness([
+    toolCallResponse('call-yield-workflow', 'workflow', { script: 'return { ok: true }' }, 'Running an independent check while the job runs.'),
+    textResponse('The independent check is done; only the background job remains.'),
+    toolCallResponse('call-yield-complete', 'complete_run', { summary: 'background job result collected' }, 'Collecting the background job result.'),
+  ], { jobsService: true, workflowTool: true })
+  try {
+    const job = h.jobs.live(h.agent.session.id)
+    h.agent.followup(user('/tdd'))
+    await withTimeout(h.agent.whenIdle(), 'turn-yield first stop')
+
+    assert.equal(h.adapter.requests.length, 2, 'a live job stop must not add a continuation nudge')
+    assert.equal(h.workflow.calls.length, 1, 'independent work must run while the job is live')
+    assert.ok(
+      requestText(h.adapter.requests[0]).includes('job_output'),
+      'the autopilot banner should carry the background-job contract',
+    )
+    assert.ok(
+      !JSON.stringify(h.adapter.requests[1].messages).includes('autopilot_continue'),
+      'yielding must not append a continuation nudge',
+    )
+    assert.ok(runPhases(h.agent).includes('waiting_job'), 'the run should enter waiting_job')
+    assert.ok(!runPhases(h.agent).includes('completed'), 'yielding is not completion')
+    assert.equal(latestRun(h.agent)?.round, 1, 'a yield on its own does not count a round')
+
+    h.jobs.settle(job)
+    h.agent.followup(completionNotice(job.id))
+    await withTimeout(h.agent.whenIdle(), 'turn-yield resume')
+
+    assert.equal(h.adapter.requests.length, 3, 'the completion notice should open exactly one new turn')
+    assert.ok(
+      requestText(h.adapter.requests[2]).includes(job.id),
+      'the notice should be the input of the resumed turn, without a new user prompt',
+    )
+    assert.equal(occurrences(requestText(h.adapter.requests[2]), '/tdd'), 1, 'no new user prompt is required')
+    const phases = runPhases(h.agent)
+    assert.ok(phases.includes('completed'), `the resumed run should complete; phases: ${phases.join(', ')}`)
+    assert.equal(latestRun(h.agent)?.round, 2, 'a yield/resume cycle counts as a round')
+    assertCacheStable(h.adapter.requests[1], h.adapter.requests[2], h.agent.session.snapshotEvents())
+    return { scenario: 'turn-yield', requests: h.adapter.requests.length, phases }
+  } finally {
+    await h.handle.dispose()
+  }
+}
+
+async function scenarioWaitingJobUserMessage() {
+  const h = await createHarness([
+    textResponse('The job is still running; only the background job remains.'),
+    textResponse('The job is at 50%; I will continue when it finishes.'),
+    toolCallResponse('call-waiting-job-complete', 'complete_run', { summary: 'answered and collected' }, 'Collecting the background job result.'),
+  ], { jobsService: true })
+  try {
+    const job = h.jobs.live(h.agent.session.id)
+    h.agent.followup(user('/tdd'))
+    await withTimeout(h.agent.whenIdle(), 'waiting-job first stop')
+    assert.ok(runPhases(h.agent).includes('waiting_job'))
+    assert.equal(latestRun(h.agent)?.round, 1)
+
+    h.agent.followup(user('进度如何了？'))
+    await withTimeout(h.agent.whenIdle(), 'waiting-job user answer')
+    assert.equal(h.adapter.requests.length, 2, 'the user message should open one new turn')
+    assert.ok(
+      requestText(h.adapter.requests[1]).includes('进度如何了？'),
+      'a user message while waiting_job must reach the model',
+    )
+    assert.ok(!requestText(h.adapter.requests[1]).includes('autopilot_continue'), 'no nudge may preempt the user')
+    assert.equal(latestRun(h.agent)?.round, 2, 'a user wake counts as a yield/resume cycle')
+    assert.ok(runPhases(h.agent).includes('waiting_job'), 'with the job still live the run yields again')
+
+    h.jobs.settle(job)
+    h.agent.followup(completionNotice(job.id))
+    await withTimeout(h.agent.whenIdle(), 'waiting-job settle')
+    assert.ok(runPhases(h.agent).includes('completed'))
+    assert.equal(latestRun(h.agent)?.round, 3, 'each wake counts toward the round cap')
+    return { scenario: 'waiting-job-user-message', requests: h.adapter.requests.length, phases: runPhases(h.agent) }
+  } finally {
+    await h.handle.dispose()
+  }
+}
+
+async function scenarioQuestionBeatsJob() {
+  const h = await createHarness([
+    textResponse('Which file should I change?'),
+    textResponse('Noted; I am still waiting for your answer.'),
+    toolCallResponse('call-question-job-complete', 'complete_run', { summary: 'answered and completed' }, 'Applying your answer.'),
+  ], { jobsService: true })
+  try {
+    const job = h.jobs.live(h.agent.session.id)
+    h.agent.followup(user('/tdd'))
+    await withTimeout(h.agent.whenIdle(), 'question-plus-job first stop')
+    const firstPhases = runPhases(h.agent)
+    assert.ok(firstPhases.includes('waiting_user'), 'a question must win over a live job')
+    assert.ok(!firstPhases.includes('waiting_job'), 'a question must not yield as waiting_job')
+
+    h.jobs.settle(job)
+    h.agent.followup(completionNotice(job.id))
+    await withTimeout(h.agent.whenIdle(), 'question-plus-job notice')
+    assert.equal(h.adapter.requests.length, 2)
+    assert.ok(!runPhases(h.agent).includes('waiting_job'), 'a completion notice must not resume a question wait')
+    assert.ok(runPhases(h.agent).includes('waiting_user'), 'the run keeps waiting for the user')
+    assert.ok(
+      !JSON.stringify(h.adapter.requests[1].messages).includes('autopilot_continue'),
+      'the notice turn must not receive an autopilot nudge',
+    )
+
+    h.agent.followup(user('Change src/example.ts'))
+    await withTimeout(h.agent.whenIdle(), 'question-plus-job answer')
+    assert.ok(runPhases(h.agent).includes('completed'), 'the user answer should resume and complete the run')
+    return { scenario: 'question-beats-job', requests: h.adapter.requests.length, phases: runPhases(h.agent) }
+  } finally {
+    await h.handle.dispose()
+  }
+}
+
+async function scenarioActiveDuration() {
+  const h = await createHarness([
+    textResponse('Stopping while the job runs.'),
+    textResponse('Still only the job is left.'),
+    toolCallResponse('call-duration-complete', 'complete_run', { summary: 'long job collected' }, 'Collecting the long-running job result.'),
+  ], { jobsService: true, pluginConfig: { maxDurationMs: 10 * 60 * 1000 } })
+  const realNow = Date.now
+  let offset = 0
+  try {
+    const settlingJob = h.jobs.live(h.agent.session.id, 'settling workflow')
+    const liveJob = h.jobs.live(h.agent.session.id, 'still-running workflow')
+    h.agent.followup(user('/tdd'))
+    await withTimeout(h.agent.whenIdle(), 'active-duration first stop')
+    assert.ok(runPhases(h.agent).includes('waiting_job'))
+
+    // Two hours pass while the turn is idle waiting for the job. Wall-clock
+    // time must not consume the run's duration budget.
+    offset = 2 * 60 * 60 * 1000
+    Date.now = () => realNow() + offset
+    h.jobs.settle(settlingJob)
+    h.agent.followup(completionNotice(settlingJob.id))
+    await withTimeout(h.agent.whenIdle(), 'active-duration second stop')
+
+    const phases = runPhases(h.agent)
+    assert.ok(
+      !phases.includes('exhausted'),
+      `waiting time must not trip the duration cap; phases: ${phases.join(', ')}`,
+    )
+    assert.equal(phases.filter(phase => phase === 'waiting_job').length, 2, 'the run should yield again after the wait')
+    assert.equal(h.adapter.requests.length, 2, 'no wall-clock wrap-up turn may be started')
+    assert.equal(latestRun(h.agent)?.phase, 'waiting_job')
+
+    h.jobs.settle(liveJob)
+    h.agent.followup(completionNotice(liveJob.id))
+    await withTimeout(h.agent.whenIdle(), 'active-duration settle')
+    assert.ok(runPhases(h.agent).includes('completed'))
+    return { scenario: 'active-duration', requests: h.adapter.requests.length, phases: runPhases(h.agent) }
+  } finally {
+    Date.now = realNow
+    await h.handle.dispose()
+  }
+}
+
+async function scenarioYieldRoundCap() {
+  const h = await createHarness([
+    textResponse('First stop while jobs run.'),
+    textResponse('Second stop while a job still runs.'),
+    textResponse('Final report at the round cap.'),
+  ], { jobsService: true, pluginConfig: { maxRounds: 2 } })
+  try {
+    const settledJob = h.jobs.live(h.agent.session.id, 'settling workflow')
+    h.jobs.live(h.agent.session.id, 'still-running workflow')
+    h.agent.followup(user('/tdd'))
+    await withTimeout(h.agent.whenIdle(), 'yield round cap first stop')
+    assert.ok(runPhases(h.agent).includes('waiting_job'))
+
+    h.jobs.settle(settledJob)
+    h.agent.followup(completionNotice(settledJob.id))
+    await withTimeout(h.agent.whenIdle(), 'yield round cap second stop')
+
+    const phases = runPhases(h.agent)
+    assert.equal(phases.filter(phase => phase === 'waiting_job').length, 1, 'a run at the cap must not yield again')
+    assert.ok(phases.includes('exhausted'), `the resumed stop should wrap up at the cap; phases: ${phases.join(', ')}`)
+    assert.equal(h.adapter.requests.length, 3, 'one notice turn plus the wrap-up turn')
+    assert.ok(
+      JSON.stringify(h.adapter.requests[2].messages).includes('autopilot_wrap_up'),
+      'the cap should steer a wrap-up instead of yielding',
+    )
+    assert.equal(latestRun(h.agent)?.round, 2)
+    return { scenario: 'yield-round-cap', requests: h.adapter.requests.length, phases }
+  } finally {
+    await h.handle.dispose()
+  }
+}
+
+async function scenarioPendingUserPreemptsYield() {
+  const h = await createHarness([
+    toolCallResponse('call-pending-wait', 'wait_tool', {}, 'Working on it.'),
+    textResponse('I reached a stop.'),
+    textResponse('Answering your queued note; the job is still running.'),
+    toolCallResponse('call-pending-complete', 'complete_run', { summary: 'queued note answered' }, 'Collecting the job result.'),
+  ], { jobsService: true, waitTool: true })
+  try {
+    const job = h.jobs.live(h.agent.session.id)
+    h.agent.followup(user('/tdd'))
+    await withTimeout(h.wait.started, 'pending-user wait start')
+    h.agent.followup(user('queued note'))
+    h.wait.release()
+    await withTimeout(h.agent.whenIdle(), 'pending-user scenario')
+
+    assert.equal(h.adapter.requests.length, 3, 'the queued note must get its own turn before yielding')
+    assert.ok(requestText(h.adapter.requests[2]).includes('queued note'), 'the queued user message must not be lost')
+    assert.ok(!requestText(h.adapter.requests[1]).includes('queued note'), 'the note belongs to the next turn')
+    const phases = runPhases(h.agent)
+    assert.equal(phases.filter(phase => phase === 'waiting_job').length, 1, 'pending user work must preempt the first yield')
+    assert.equal(latestRun(h.agent)?.round, 1, 'the preempted stop is not a yield/resume cycle')
+
+    h.jobs.settle(job)
+    h.agent.followup(completionNotice(job.id))
+    await withTimeout(h.agent.whenIdle(), 'pending-user settle')
+    assert.ok(runPhases(h.agent).includes('completed'))
+    assert.equal(latestRun(h.agent)?.round, 2)
+    return { scenario: 'pending-user-preempts-yield', requests: h.adapter.requests.length, phases: runPhases(h.agent) }
+  } finally {
+    await h.handle.dispose()
+  }
+}
+
 async function scenarioAutopilotPause() {
   const h = await createHarness([
     toolCallResponse('call-wait', 'wait_tool', {}, 'Waiting.'),
@@ -789,6 +1072,12 @@ for (const scenario of [
   scenarioPauseResume,
   scenarioAutopilotPause,
   scenarioQuestion,
+  scenarioTurnYield,
+  scenarioWaitingJobUserMessage,
+  scenarioQuestionBeatsJob,
+  scenarioActiveDuration,
+  scenarioYieldRoundCap,
+  scenarioPendingUserPreemptsYield,
   scenarioRoundCap,
   scenarioIndependentInstall,
 ]) {
