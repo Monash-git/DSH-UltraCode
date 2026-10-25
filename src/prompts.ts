@@ -18,6 +18,20 @@ ${TASK_STATE_MARKER}
 Any multi-step task: keep the todo list current. When the plan changes — a task is added, completed, reordered, or dropped — update the todo list in the same step so the user sees current progress. This applies to every task, regardless of its type.
 </ultracode_task_state>`
 
+/** Stable marker used to inject the generic safe-observation prompt once per root session. */
+export const OBSERVATION_MARKER = '[ultracode:observation]'
+
+/**
+ * One-time generic safe-observation instruction. It is deliberately
+ * skill-agnostic and names no ticket, phase, or skill concept.
+ */
+export const OBSERVATION_PROMPT = `<ultracode_observation>
+${OBSERVATION_MARKER}
+For progress or current-session questions, use the session_status tool: it reports the turn, step, run state, todo summary, active background jobs, and pause state without reading any file.
+When you need prior or session evidence, use the session-history tools (session_search, session_event_search, session_trace, session_event_trace, session_event_read) instead of reading raw archives.
+Never decompress a raw session archive such as a .zstd file ad hoc. One frame of a multi-frame archive is only a partial prefix and is not evidence; never conclude from such a read that a session is empty, missing, or a stub. If you recognize a multi-frame or format problem, stop investigating that file. Do not enumerate profile directories or node_modules during diagnosis.
+</ultracode_observation>`
+
 /** The standing reply-first rule shared by the generic autopilot and Ultra assets. */
 export const REPLY_FIRST_RULE = 'Reply first: a direct user question, including a progress question, is answered in the same step before any new diagnostic. Asking for progress does not stop the run; answer, then continue.'
 
