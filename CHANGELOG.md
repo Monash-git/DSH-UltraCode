@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added autopilot turn yield: a run whose only remaining dependency is an
+  owned running background job enters `waiting_job`, ends the turn without a
+  continuation nudge, and resumes on the job's completion notice. Duration
+  caps count active time only, and the prompt contract forbids blocking
+  `job_output` sleeps.
 - Added the generic read-only `session_status` root-session tool (turn, step,
   run state, todo summary and last-updated time, active owned jobs, pause).
 - Added a one-time safe-observation prompt: use status/history tools, treat a
