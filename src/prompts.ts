@@ -6,6 +6,21 @@ export const ULTRA_STANDING_MARKER = '[ultracode:standing]'
 /** Stable prefix used to detect the per-turn reminder in the log. */
 export const ULTRA_REMINDER_PREFIX = '[ultracode:reminder:'
 
+/** Stable marker used to inject the generic task-state prompt once per root session. */
+export const TASK_STATE_MARKER = '[ultracode:task-state]'
+
+/**
+ * One-time generic task-state instruction. It is deliberately skill-agnostic:
+ * no ticket, phase, or skill name appears here.
+ */
+export const TASK_STATE_PROMPT = `<ultracode_task_state>
+${TASK_STATE_MARKER}
+Any multi-step task: keep the todo list current. When the plan changes — a task is added, completed, reordered, or dropped — update the todo list in the same step so the user sees current progress. This applies to every task, regardless of its type.
+</ultracode_task_state>`
+
+/** The standing reply-first rule shared by the generic autopilot and Ultra assets. */
+export const REPLY_FIRST_RULE = 'Reply first: a direct user question, including a progress question, is answered in the same step before any new diagnostic. Asking for progress does not stop the run; answer, then continue.'
+
 /**
  * The full Ultra standing playbook, injected when the mode arms, after a
  * resume, and after compaction. Selecting Ultra is the explicit workflow ask.
@@ -13,6 +28,8 @@ export const ULTRA_REMINDER_PREFIX = '[ultracode:reminder:'
 export const ULTRA_STANDING_PLAYBOOK = `<ultracode_standing>
 ${ULTRA_STANDING_MARKER}
 Ultra is ON for this session. This selection is the user's explicit request to use the workflow tool. Work as a proactive orchestrator, not as a single-agent assistant. Within this run, token cost is not the constraint: optimize for the most exhaustive, correct answer rather than the fastest or cheapest one.
+
+${REPLY_FIRST_RULE}
 
 Every substantive task should author and run at least one workflow. Treat these as substantive: repository-wide or multi-file work, migrations, audits, cross-checked research, multi-angle plans, implementation with independent verification, and any task with several independent units. Stay solo only for conversational turns, trivial mechanical edits, work that is already verified, or when the workflow tool is unavailable. Do not force a workflow on a one-line question.
 
@@ -36,6 +53,7 @@ Workflow mechanics:
 export function ultraReminder(turn: number, fanoutLimit: number): string {
   return `<ultracode_reminder turn="${turn}">
 ${ULTRA_REMINDER_PREFIX}${turn}] Ultra is still on. For this substantive task, author and run a workflow before falling back to solo work; use the standing quality recipes and fan out at most ${fanoutLimit} agents at a time. Do not force a workflow for conversational or trivial work.
+${REPLY_FIRST_RULE}
 </ultracode_reminder>`
 }
 
@@ -47,6 +65,7 @@ This is a one-shot DSH autopilot run. Do not stop after one step or one ticket. 
 - the work is complete and verified: call complete_run;
 - you are blocked: call complete_run with blocked set to the blocker.
 Do not ask the user to re-run the command. Do not implement beyond the skill's destination.
+${REPLY_FIRST_RULE}
 </autopilot_run>`
 }
 
@@ -61,6 +80,7 @@ export function continuationNudge(
   return `<autopilot_continue skill="${escapeAttribute(skill)}" round="${round}" max="${max}">
 Continue the run. Current todos: ${todoSummary}. Remaining work: ${remaining}.
 Do not stop until complete; call complete_run when done, or ask_user_question if you need a decision.
+${REPLY_FIRST_RULE}
 </autopilot_continue>`
 }
 

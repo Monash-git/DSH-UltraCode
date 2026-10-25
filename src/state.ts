@@ -320,8 +320,8 @@ export function lastSeq(agent: SessionCarrier): number {
   return last === undefined ? 0 : last.seq
 }
 
-/** Whether the full Ultra playbook appears after the latest compaction. */
-export function hasFullPlaybookSinceCompaction(agent: SessionCarrier, marker: string): boolean {
+/** Whether a plugin prompt carrying the marker appears after the latest compaction. */
+export function hasPromptSinceCompaction(agent: SessionCarrier, marker: string): boolean {
   const events = agent.session.snapshotEvents()
   let lastCompaction = -1
   let lastPlaybook = -1
