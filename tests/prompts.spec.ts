@@ -40,6 +40,12 @@ describe('reply-first prompt assets', () => {
     expectReplyFirst(autopilotBanner('tdd', 1, 20))
     expectReplyFirst(continuationNudge('tdd', 2, 20, '1 completed, 1 open', 'tests'))
   })
+
+  it('keeps ticket and phase vocabulary out of the generic prompt assets', () => {
+    expect(ULTRA_STANDING_PLAYBOOK).not.toMatch(/ticket|phase/i)
+    expect(autopilotBanner('tdd', 1, 20)).not.toMatch(/ticket|phase/i)
+    expect(continuationNudge('tdd', 2, 20, '1 completed, 1 open', 'tests')).not.toMatch(/ticket|phase/i)
+  })
 })
 
 describe('background-job prompt contract', () => {

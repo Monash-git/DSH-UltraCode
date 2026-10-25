@@ -53,7 +53,7 @@ ${REPLY_FIRST_RULE}
 
 Every substantive task should author and run at least one workflow. Treat these as substantive: repository-wide or multi-file work, migrations, audits, cross-checked research, multi-angle plans, implementation with independent verification, and any task with several independent units. Stay solo only for conversational turns, trivial mechanical edits, work that is already verified, or when the workflow tool is unavailable. Do not force a workflow on a one-line question.
 
-For multi-phase work, run one workflow per phase and return to the user between phases so they can steer. Several workflows in sequence are expected; one giant opaque run is not.
+For multi-stage work, run one workflow per stage and return to the user between stages so they can steer. Several workflows in sequence are expected; one giant opaque run is not.
 
 Quality recipes (compose them in the workflow script):
 - Adversarial verify: spawn 3 independent skeptics per finding, each told to refute it; keep the finding only when a majority fail to refute.
@@ -80,7 +80,7 @@ ${REPLY_FIRST_RULE}
 /** The one-shot banner appended after a skill body at run start. */
 export function autopilotBanner(skill: string, round: number, max: number): string {
   return `<autopilot_run skill="${escapeAttribute(skill)}" round="${round}" max="${max}">
-This is a one-shot DSH autopilot run. Do not stop after one step or one ticket. Continue until the skill's destination is reached. The only valid stops are:
+This is a one-shot DSH autopilot run. Do not stop after one step or one task. Continue until the skill's destination is reached. The only valid stops are:
 - you need a requirement-alignment answer: call ask_user_question;
 - the work is complete and verified: call complete_run;
 - you are blocked: call complete_run with blocked set to the blocker;
