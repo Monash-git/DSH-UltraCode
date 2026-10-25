@@ -27,16 +27,27 @@ export interface InboxCarrier {
   }
 }
 
-/** The subset of one background job the turn-yield check reads. */
+/** The subset of one background job's output projection the pause protocol reads. */
+export interface JobOutputLike {
+  readonly spillPaths?: readonly string[]
+}
+
+/** The subset of one background job the turn-yield and pause checks read. */
 export interface JobViewLike {
   readonly id?: unknown
   readonly owner?: unknown
   readonly status: string
+  readonly kind?: unknown
+  readonly label?: unknown
+  readonly output?: JobOutputLike
 }
 
 /** The subset of the optional `ctx.jobs` service the plugin depends on. */
 export interface JobRegistryLike {
   list(caller?: unknown): readonly JobViewLike[]
+  kill?(id: unknown, caller?: unknown, reason?: string): 'requested' | 'already-finished'
+  wait?(id: unknown, timeoutMs: number, caller?: unknown, signal?: AbortSignal): Promise<JobViewLike>
+  get?(id: unknown, caller?: unknown): JobViewLike
 }
 
 /**
@@ -280,13 +291,89 @@ export function catalogChildren(events: readonly SessionEvent[]): Map<string, Ca
   return result
 }
 
+/** One durable workflow run folded from this session's workflow records. */
+export interface WorkflowRunRow {
+  readonly runId: string
+  readonly name: string
+  childIds: string[]
+  finished: boolean
+}
+
+/** Fold the durable workflow run and member records written by the workflow tool. */
+export function workflowRuns(events: readonly SessionEvent[]): WorkflowRunRow[] {
+  const result = new Map<string, WorkflowRunRow>()
+  for (const event of events) {
+    const type = event.type as string
+    if (type === 'tool-workflow/run-start') {
+      const data = event.data as { runId?: unknown; name?: unknown }
+      if (typeof data.runId !== 'string' || typeof data.name !== 'string') continue
+      const existing = result.get(data.runId)
+      result.set(data.runId, {
+        runId: data.runId,
+        name: data.name,
+        childIds: existing?.childIds ?? [],
+        finished: existing?.finished ?? false,
+      })
+      continue
+    }
+    if (type === 'tool-workflow/agent-start') {
+      const data = event.data as { runId?: unknown; childId?: unknown }
+      if (typeof data.runId !== 'string' || typeof data.childId !== 'string') continue
+      const run = result.get(data.runId)
+      if (run === undefined) {
+        result.set(data.runId, {
+          runId: data.runId,
+          name: data.runId,
+          childIds: [data.childId],
+          finished: false,
+        })
+        continue
+      }
+      if (!run.childIds.includes(data.childId)) run.childIds.push(data.childId)
+      continue
+    }
+    if (type === 'tool-workflow/run-end') {
+      const data = event.data as { runId?: unknown }
+      if (typeof data.runId !== 'string') continue
+      const run = result.get(data.runId)
+      if (run !== undefined) run.finished = true
+    }
+  }
+  return [...result.values()]
+}
+
+/**
+ * Find the original workflow script for one run name. The workflow engine
+ * keeps no journal; the model-written script survives only in the assistant
+ * tool call, so this is the saved plan a restart can rely on.
+ */
+export function workflowPlan(events: readonly SessionEvent[], name: string): string | undefined {
+  let plan: string | undefined
+  for (const event of events) {
+    if ((event.type as string) !== 'tool/call') continue
+    const data = event.data as { name?: unknown; arguments?: unknown }
+    if (typeof data.arguments !== 'string') continue
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(data.arguments)
+    } catch {
+      continue
+    }
+    if (typeof parsed !== 'object' || parsed === null) continue
+    const args = parsed as { meta?: unknown; script?: unknown }
+    if (typeof args.meta !== 'object' || args.meta === null) continue
+    const meta = args.meta as { name?: unknown }
+    if (meta.name !== name || typeof args.script !== 'string') continue
+    plan = args.script
+  }
+  return plan
+}
+
 /** Child ids started by the model-facing workflow tool in this session. */
 export function workflowChildIds(events: readonly SessionEvent[]): Set<string> {
   const result = new Set<string>()
-  for (const event of events) {
-    if ((event.type as string) !== 'tool-workflow/agent-start') continue
-    const data = event.data as { childId?: unknown }
-    if (typeof data.childId === 'string') result.add(data.childId)
+  for (const run of workflowRuns(events)) {
+    for (const childId of run.childIds) result.add(childId)
   }
   return result
 }

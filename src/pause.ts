@@ -170,17 +170,20 @@ export class PauseController {
   async resumeAsync(agent: Agent): Promise<PauseOutcome> {
     if (!isRootAgent(agent)) return { ok: false, text: 'Resume is only available to the root session.' }
     let warnings: string[] = []
+    let restart: string | undefined
     if (this.coordinator !== undefined) {
       try {
         const released = await this.coordinator.release(agent, 'resume')
         warnings = [...released.warnings]
+        restart = released.restart?.summary
       } catch (error: unknown) {
         warnings = [`Child release failed: ${error instanceof Error ? error.message : String(error)}`]
       }
     }
     const outcome = this.resumeLocal(agent, true)
-    if (!outcome.ok || warnings.length === 0) return outcome
-    return { ok: true, text: `${outcome.text} ${warnings.join(' ')}` }
+    if (warnings.length === 0 && restart === undefined) return outcome
+    const detail = [restart ?? '', ...warnings].filter(text => text !== '').join(' ')
+    return { ok: outcome.ok, text: `${outcome.text} ${detail}`.trim() }
   }
 
   private resumeLocal(agent: Agent, releasedChildren: boolean): PauseOutcome {

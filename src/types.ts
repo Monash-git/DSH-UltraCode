@@ -56,9 +56,11 @@ export type PauseChildState =
   | 'parked'
   | 'idle'
   | 'forced'
+  | 'stopped'
   | 'resumed'
   | 'cold-resumed'
   | 'restarted'
+  | 'restart-required'
   | 'unavailable'
   | 'disposed'
   | 'cancelled'
@@ -78,15 +80,74 @@ export interface PauseManifestChild {
   readonly warning?: string
 }
 
-/** One background job observed by the pause protocol; ticket 07 owns its disposition. */
+/**
+ * What pause/play did with one background job.
+ *
+ * - `recorded`: observed only (not a workflow/bash job, or no stop was needed).
+ * - `settled`: already terminal before pause, or finished during the drain.
+ * - `stopped`: a kill was requested and a terminal settlement was observed.
+ * - `stop-failed`: the job could not be stopped or its stop could not be
+ *   confirmed; it must not be reported as paused or stopped.
+ * - `restart-required`: Play issued a restart instruction for the stopped job.
+ * - `cancelled`: the pause was cancelled, so no automatic restart follows.
+ */
+export type PauseJobDisposition =
+  | 'recorded'
+  | 'settled'
+  | 'stopped'
+  | 'stop-failed'
+  | 'restart-required'
+  | 'cancelled'
+
+/** One background job observed and, for workflow/bash work, stopped by pause. */
 export interface PauseManifestJob {
-  readonly id: string
-  readonly kind?: string
-  readonly owner?: string
-  readonly ownerKind: 'root' | 'child'
-  readonly status?: string
-  /** This ticket records jobs only; stopping and restarting belong to ticket 07. */
-  readonly disposition: 'recorded'
+  id: string
+  kind?: string
+  label?: string
+  owner?: string
+  ownerKind: 'root' | 'child'
+  status?: string
+  /** Durable output files the producer kept for this job, when it reported any. */
+  outputs?: readonly string[]
+  disposition: PauseJobDisposition
+  stoppedAt?: number
+  warning?: string
+}
+
+/**
+ * Lifecycle of one workflow run captured at pause.
+ *
+ * - `running`: live when the pause started.
+ * - `finished`: the root session already recorded its `run-end`.
+ * - `settled`: it finished during the pause drain before a kill was needed.
+ * - `stopped`: its job reached a terminal state after the kill request.
+ * - `stop-failed`: its job could not be stopped or confirmed stopped.
+ * - `restart-required`: Play instructed the root to restart it.
+ */
+export type PauseWorkflowState =
+  | 'running'
+  | 'finished'
+  | 'settled'
+  | 'stopped'
+  | 'stop-failed'
+  | 'restart-required'
+
+/**
+ * Durable capture of one workflow run: the plan (the original script), the
+ * output paths the producer kept, and every child Session id. The workflow
+ * engine has no journal, so Play restarts from this state instead of claiming
+ * a run-level resume.
+ */
+export interface PauseManifestWorkflow {
+  runId: string
+  name: string
+  jobId?: string
+  childIds: string[]
+  plan?: string
+  artifacts: string[]
+  workspace?: string
+  state: PauseWorkflowState
+  warning?: string
 }
 
 /** Durable root-owned pause manifest; the single source of truth for a pause. */
@@ -100,9 +161,12 @@ export interface PauseManifestEvent {
   rootCheckpointAt?: number
   rootCheckpointSeq?: number
   children: readonly PauseManifestChild[]
-  readonly jobs: readonly PauseManifestJob[]
+  jobs: PauseManifestJob[]
+  workflows?: PauseManifestWorkflow[]
   forced: number
   warning?: string
+  /** The model-visible restart instruction Play delivered, for the durable record. */
+  restartInstruction?: string
 }
 
 /** Durable checkpoint written into a parked child's own session. */

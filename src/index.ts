@@ -76,6 +76,7 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
     (ctx as unknown as { get(name: string): unknown }).get('jobs') as JobRegistryLike | undefined
   const coordinator = new PauseCoordinator({
     timeoutMs: settings.pauseTimeoutMs,
+    drainMs: settings.pauseDrainMs,
     agents: () => (ctx as unknown as { get(name: string): unknown }).get('agents') as
       | LiveAgentRegistryLike
       | undefined,

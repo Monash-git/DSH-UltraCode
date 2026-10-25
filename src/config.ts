@@ -19,6 +19,8 @@ export interface PluginConfig {
   readonly fanoutLimit?: number
   /** Bounded wait for local child pause acknowledgments before forcing a stop. */
   readonly pauseTimeoutMs?: number
+  /** Bounded drain before and after stopping a non-pausable workflow/bash job. */
+  readonly pauseDrainMs?: number
 }
 
 export interface ResolvedConfig {
@@ -30,6 +32,7 @@ export interface ResolvedConfig {
   readonly ultraReminder: boolean
   readonly fanoutLimit: number
   readonly pauseTimeoutMs: number
+  readonly pauseDrainMs: number
 }
 
 const DEFAULT_MAX_ROUNDS = 120
@@ -37,6 +40,7 @@ const DEFAULT_MAX_DURATION_MS = 60 * 60 * 1000
 const DEFAULT_NO_PROGRESS_ROUNDS = 3
 const DEFAULT_FANOUT_LIMIT = 8
 const DEFAULT_PAUSE_TIMEOUT_MS = 60_000
+const DEFAULT_PAUSE_DRAIN_MS = 2_000
 const SHORT_SKILL_DURATION_MS = 30 * 60 * 1000
 
 /** Resolve and validate the plugin configuration. */
@@ -54,6 +58,7 @@ export function resolveConfig(config: PluginConfig = {}): ResolvedConfig {
     ultraReminder: config.ultraReminder ?? true,
     fanoutLimit: positiveInteger('fanoutLimit', config.fanoutLimit ?? DEFAULT_FANOUT_LIMIT),
     pauseTimeoutMs: positiveInteger('pauseTimeoutMs', config.pauseTimeoutMs ?? DEFAULT_PAUSE_TIMEOUT_MS),
+    pauseDrainMs: positiveInteger('pauseDrainMs', config.pauseDrainMs ?? DEFAULT_PAUSE_DRAIN_MS),
   }
 }
 
