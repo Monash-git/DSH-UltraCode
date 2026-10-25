@@ -145,10 +145,21 @@ export function primaryText(view: PrimaryView, t?: (key: string) => string): Pri
     const title = `${label} — ${waiting}`
     return { label: title, title, status: waiting }
   }
-  if (view.kind === 'play' && (view.progress?.forced ?? 0) > 0) {
-    const forced = format(lookup('pausedForced'), { forced: view.progress?.forced ?? 0 })
-    const title = `${label} — ${forced}`
-    return { label: title, title, status: forced }
+  if (view.kind === 'play') {
+    // Forced stops and stopped workflow/bash work both change what Play does;
+    // telling the user now prevents a "resume" expectation for a restart.
+    const parts: string[] = []
+    if ((view.progress?.forced ?? 0) > 0) {
+      parts.push(format(lookup('pausedForced'), { forced: view.progress?.forced ?? 0 }))
+    }
+    if (view.progress?.warning !== undefined && view.progress.warning !== '') {
+      parts.push(format(lookup('restartWarning'), { warning: view.progress.warning }))
+    }
+    if (parts.length > 0) {
+      const status = parts.join(' ')
+      const title = `${label} — ${status}`
+      return { label: title, title, status }
+    }
   }
   return { label, title: label }
 }

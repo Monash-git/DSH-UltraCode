@@ -10,6 +10,16 @@
   cancels the pause and releases held wakes into the new direction. A pause
   restored after a restart reports that its background jobs did not survive
   and must be restarted from the saved plan or checkpoint.
+- Pause now stops workflow and bash/pwsh background jobs instead of leaving
+  them running. After the child park drain, the coordinator requests a kill
+  through the host jobs service and waits a short bounded drain for
+  settlement. The pause manifest captures each workflow run's original script
+  (the saved plan), output paths, workspace, and member child Session ids, and
+  records every job's disposition. A failed stop is a visible `stop-failed`
+  warning and never a paused/stopped claim. Play sends the root a restart
+  instruction that rebuilds workflow work from the saved plan/artifacts and
+  re-runs stopped bash work only if needed; it does not claim run-level resume.
+  The primary control and `/resume` surface the restart warning.
 - Added root-mediated pause for local subagents. Pause now writes a durable
   manifest and sends each live descendant a host pre-step park control; the
   child flushes its session, records a checkpoint, acknowledges, and keeps its

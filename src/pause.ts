@@ -134,21 +134,19 @@ export class PauseController {
     if (!this.paused.has(key)) return
     const manifest = latestPauseManifest(events)
     if (manifest === undefined) return
-    const warning = processRestart ? jobRestartWarning(manifest) : undefined
-    if (warning !== undefined) this.restoredWarnings.set(key, warning)
+    // A restart cannot resume its jobs; a reload keeps this process (and its
+    // jobs), so it never claims they were lost.
+    const lostJobs = processRestart ? jobRestartWarning(manifest) : undefined
+    const restoredWarning = lostJobs ?? manifest.restoredWarning
+    if (restoredWarning !== undefined) this.restoredWarnings.set(key, restoredWarning)
     const settled = manifest.phase === 'pausing' || manifest.phase === 'resuming'
-    if (!settled && (warning === undefined || manifest.warning?.includes(warning) === true)) return
-    const combined = warning === undefined
-      ? manifest.warning
-      : manifest.warning === undefined
-        ? warning
-        : manifest.warning.includes(warning)
-          ? manifest.warning
-          : `${manifest.warning} ${warning}`
+    if (!settled && lostJobs === undefined) return
+    const combined = combineWarnings(manifest.warning, restoredWarning)
     appendPauseManifest(agent, {
       ...manifest,
       ...(settled ? { phase: 'paused' as const } : {}),
-      ...combined === undefined ? {} : { warning: combined },
+      ...(restoredWarning === undefined ? {} : { restoredWarning }),
+      ...(combined === undefined ? {} : { warning: combined }),
       updatedAt: Date.now(),
     })
   }
@@ -255,10 +253,12 @@ export class PauseController {
     if (!isRootAgent(agent)) return { ok: false, text: 'Resume is only available to the root session.' }
     const key = sessionKey(agent)
     const warnings: string[] = []
+    let restart: string | undefined
     if (this.coordinator !== undefined) {
       try {
         const released = await this.coordinator.release(agent, 'resume')
         warnings.push(...released.warnings)
+        restart = released.restart?.summary
       } catch (error: unknown) {
         warnings.push(`Child release failed: ${error instanceof Error ? error.message : String(error)}`)
       }
@@ -269,10 +269,11 @@ export class PauseController {
     // The release records are only as good as the next flush; Play is the one
     // place where waiting for durability does not delay a live turn.
     await this.wake.flush(agent)
-    if (!outcome.ok) return outcome
-    this.restoredWarnings.delete(key)
-    if (warnings.length === 0) return outcome
-    return { ok: true, text: `${outcome.text} ${warnings.join(' ')}` }
+    if (outcome.ok) this.restoredWarnings.delete(key)
+    const uniqueWarnings = [...new Set(warnings)]
+    if (uniqueWarnings.length === 0 && restart === undefined) return outcome
+    const detail = [restart ?? '', ...uniqueWarnings].filter(text => text !== '').join(' ')
+    return { ok: outcome.ok, text: `${outcome.text} ${detail}`.trim() }
   }
 
   private resumeLocal(agent: Agent, releasedChildren: boolean): PauseOutcome {
@@ -511,4 +512,10 @@ function jobRestartWarning(manifest: PauseManifestEvent | undefined): string | u
   const subject = lost.length === 1 ? '1 background job' : `${lost.length} background jobs`
   const object = lost.length === 1 ? 'it' : 'them'
   return `${subject} did not survive the process restart; restart ${object} from the saved plan or checkpoint.`
+}
+
+function combineWarnings(existing: string | undefined, addition: string | undefined): string | undefined {
+  if (addition === undefined) return existing
+  if (existing === undefined || existing === '') return addition
+  return existing.includes(addition) ? existing : `${existing} ${addition}`
 }

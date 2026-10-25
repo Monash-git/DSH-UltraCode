@@ -112,6 +112,85 @@ class FakeChild {
   }
 }
 
+/** One job view the fake registry hands out. */
+interface FakeJobView {
+  id: string
+  kind: string
+  label: string
+  owner?: string
+  status: 'running' | 'stopping' | 'completed' | 'killed' | 'failed'
+  startedAt: number
+  output: { total: number; earliest: number; spillPaths?: string[] }
+  detail?: string
+}
+
+/**
+ * Fake jobs registry covering the host job surface the pause coordinator
+ * uses: list/kill/wait with owner isolation. `refuseToSettle` models a
+ * producer that acknowledges the kill request but never reaches a terminal
+ * state; `killError` models a registry that cannot stop the job at all.
+ */
+class FakeJobs implements JobRegistryLike {
+  readonly views: FakeJobView[] = []
+  readonly kills: Array<{ id: string; caller?: unknown; reason?: string }> = []
+  readonly waits: Array<{ id: string; timeoutMs: number; caller?: unknown }> = []
+  killError: Error | undefined
+  readonly refuseToSettle = new Set<string>()
+  onKill: ((id: string) => void) | undefined
+  onList: (() => void) | undefined
+
+  list(caller?: unknown): readonly FakeJobView[] {
+    this.onList?.()
+    return this.views.filter(view =>
+      view.owner === undefined || String(view.owner) === String(caller))
+  }
+
+  get(id: string, caller?: unknown): FakeJobView {
+    const view = this.views.find(candidate => candidate.id === id)
+    if (view === undefined) throw new Error(`unknown job ${id}`)
+    if (view.owner !== undefined && String(view.owner) !== String(caller)) {
+      throw new Error(`job ${id} belongs to another session`)
+    }
+    return view
+  }
+
+  kill(id: string, caller?: unknown, reason?: string): 'requested' | 'already-finished' {
+    this.kills.push({ id, caller, reason })
+    if (this.killError !== undefined) throw this.killError
+    const view = this.get(id, caller)
+    if (view.status === 'completed' || view.status === 'killed' || view.status === 'failed') {
+      return 'already-finished'
+    }
+    this.onKill?.(id)
+    view.status = this.refuseToSettle.has(id) ? 'stopping' : 'killed'
+    return 'requested'
+  }
+
+  async wait(id: string, timeoutMs: number, caller?: unknown): Promise<FakeJobView> {
+    this.waits.push({ id, timeoutMs, caller })
+    const view = this.get(id, caller)
+    if (view.status === 'running' || view.status === 'stopping') {
+      await new Promise(resolve => setTimeout(resolve, Math.min(timeoutMs, 5)))
+    }
+    return { ...view }
+  }
+
+  add(overrides: Partial<FakeJobView> & Pick<FakeJobView, 'kind' | 'label'>): FakeJobView {
+    const view: FakeJobView = {
+      id: overrides.id ?? `job-${this.views.length + 1}`,
+      kind: overrides.kind,
+      label: overrides.label,
+      ...overrides.owner === undefined ? {} : { owner: overrides.owner },
+      status: overrides.status ?? 'running',
+      startedAt: overrides.startedAt ?? Date.now(),
+      output: overrides.output ?? { total: 0, earliest: 0 },
+      ...overrides.detail === undefined ? {} : { detail: overrides.detail },
+    }
+    this.views.push(view)
+    return view
+  }
+}
+
 interface World {
   readonly root: Agent
   readonly children: FakeChild[]
@@ -132,10 +211,14 @@ interface World {
 
 function createWorld(options: {
   timeoutMs?: number
+  drainMs?: number
   jobs?: JobRegistryLike
   coldResumeFails?: boolean
 } = {}): World {
-  const config = resolveConfig({ pauseTimeoutMs: options.timeoutMs ?? 1_000 })
+  const config = resolveConfig({
+    pauseTimeoutMs: options.timeoutMs ?? 1_000,
+    ...options.drainMs === undefined ? {} : { pauseDrainMs: options.drainMs },
+  })
   const runs = new Map<string, ReturnType<typeof createRunState>>()
   const children: FakeChild[] = []
   const flushes: Session[] = []
@@ -156,6 +239,7 @@ function createWorld(options: {
     inbox: { nextStep: [], nextTurn: [] },
     cancel: vi.fn(),
     steer: vi.fn(),
+    inject: vi.fn(),
     followup: vi.fn(),
     whenIdle: async () => {},
   } as unknown as Agent
@@ -194,6 +278,7 @@ function createWorld(options: {
 
   const deps: PauseCoordinatorDeps = {
     timeoutMs: config.pauseTimeoutMs,
+    drainMs: config.pauseDrainMs,
     agents: liveAgents,
     subagents: () => subagents,
     sessions: () => ({
@@ -481,19 +566,147 @@ describe('root pause protocol for local subagents', () => {
     expect(child.batches).toEqual([])
     expect(latestManifest(world.root)?.children[0]).toMatchObject({
       id: child.id,
-      state: 'unavailable',
+      state: 'restart-required',
     })
     expect(latestManifest(world.root)?.warning).toContain('restart its workflow')
   })
 
-  it('records idle children as acknowledged and job ids for ticket 07 without stopping them', async () => {
+  it('never steers a live workflow child on Play; it is left to the workflow restart', async () => {
+    const world = createWorld()
+    const child = world.addChild('idle workflow child')
+    child.status = 'idle'
+    ;(world.root.session as unknown as { append(type: string, data: unknown): unknown }).append(
+      'tool-workflow/agent-start',
+      { runId: 'run-1', seq: 1, label: 'idle workflow child', childId: child.agent.session.id },
+    )
+
+    world.pause.pause(world.root)
+    await waitFor(() => latestManifest(world.root)?.phase === 'paused', 'idle workflow child paused')
+    expect(latestManifest(world.root)?.children[0]).toMatchObject({
+      id: child.id,
+      workflow: true,
+      state: 'idle',
+    })
+
+    await world.pause.resumeAsync(world.root)
+    expect(child.batches).toEqual([])
+    expect(latestManifest(world.root)?.children[0]).toMatchObject({
+      id: child.id,
+      state: 'restart-required',
+    })
+    expect(latestManifest(world.root)?.warning).toContain('restart its workflow')
+  })
+
+  it('stops a running workflow job after parking its children and records its plan, artifacts, and child ids', async () => {
+    const jobs = new FakeJobs()
+    const world = createWorld({ drainMs: 10, jobs })
+    const child = world.addChild('audit child 1')
+    child.status = 'running'
+    const rootId = String(world.root.session.id)
+    world.root.session.append('tool-workflow/run-start', { runId: 'run-1', name: 'audit' })
+    world.root.session.append('tool-workflow/agent-start', {
+      runId: 'run-1',
+      seq: 1,
+      label: 'audit child 1',
+      childId: child.agent.session.id,
+    })
+    world.root.session.append('tool/call', {
+      turn: 1,
+      step: 1,
+      callId: 'call-1',
+      name: 'workflow',
+      arguments: JSON.stringify({
+        meta: { name: 'audit' },
+        script: 'phase("scan")\nawait agent("inspect")',
+      }),
+    } as never)
+    const job = jobs.add({
+      kind: 'workflow',
+      label: 'audit',
+      owner: rootId,
+      output: { total: 10, earliest: 0, spillPaths: ['C:/tmp/audit.log'] },
+    })
+    jobs.onKill = () => child.agent.cancel({ kind: 'parent' }, { keepInbox: true })
+
+    world.pause.pause(world.root)
+    await waitFor(() => latestManifest(world.root)?.phase === 'paused', 'workflow job stopped')
+
+    const manifest = latestManifest(world.root)!
+    expect(manifest.jobs).toEqual([
+      expect.objectContaining({
+        id: job.id,
+        kind: 'workflow',
+        label: 'audit',
+        disposition: 'stopped',
+        status: 'killed',
+      }),
+    ])
+    expect(manifest.workflows).toEqual([
+      expect.objectContaining({
+        runId: 'run-1',
+        name: 'audit',
+        jobId: job.id,
+        childIds: [child.id],
+        plan: expect.stringContaining('phase("scan")'),
+        artifacts: ['C:/tmp/audit.log'],
+        state: 'stopped',
+      }),
+    ])
+    expect(jobs.kills).toEqual([{ id: job.id, caller: rootId, reason: 'paused by user' }])
+    expect(manifest.children[0]).toMatchObject({
+      id: child.id,
+      workflow: true,
+      state: 'stopped',
+    })
+    expect(manifest.warning).toContain('restart its workflow')
+    // The workflow child is only ever parked through the hidden host control;
+    // no normal finish/pause message is sent to it.
+    expect(world.subagents.sendMessage).not.toHaveBeenCalled()
+    expect(child.batches).toEqual([])
+
+    const outcome = await world.pause.resumeAsync(world.root)
+    expect(outcome.text).toMatch(/Workflow "audit" restarts from its saved plan/)
+    expect(outcome.text).toMatch(/run-level resume is not available/i)
+    const resumed = latestManifest(world.root)!
+    expect(resumed.jobs[0]?.disposition).toBe('restart-required')
+    expect(resumed.workflows?.[0]).toMatchObject({ runId: 'run-1', state: 'restart-required' })
+    expect(resumed.restartInstruction).toContain('C:/tmp/audit.log')
+    expect(resumed.restartInstruction).toContain(child.id)
+    expect(resumed.restartInstruction).toMatch(/run-level resume/i)
+    expect(child.batches).toEqual([])
+  })
+
+  it('stops a child-owned bash job with the owning child as the kill caller', async () => {
+    const jobs = new FakeJobs()
+    const world = createWorld({ drainMs: 5, jobs })
+    const child = world.addChild('job owner')
+    child.status = 'idle'
+    const job = jobs.add({ kind: 'bash', label: 'child build', owner: child.id })
+
+    world.pause.pause(world.root)
+    await waitFor(() => latestManifest(world.root)?.phase === 'paused', 'child-owned job stopped')
+
+    expect(latestManifest(world.root)?.jobs).toEqual([
+      expect.objectContaining({
+        id: job.id,
+        kind: 'bash',
+        owner: child.id,
+        ownerKind: 'child',
+        disposition: 'stopped',
+      }),
+    ])
+    expect(jobs.kills).toEqual([{ id: job.id, caller: child.id, reason: 'paused by user' }])
+  })
+
+  it('records an idle child and a non-workflow job without stopping either', async () => {
     const rootId = 'root-session'
     const jobs: JobRegistryLike = {
       list(caller) {
         return String(caller) === rootId
-          ? [{ id: 'job-root-1', kind: 'workflow', owner: rootId, status: 'running' }]
+          ? [{ id: 'job-root-1', kind: 'research', owner: rootId, status: 'running' }]
           : []
       },
+      kill: vi.fn(),
     }
     const world = createWorld({ jobs })
     const idle = world.addChild('idle child')
@@ -507,13 +720,14 @@ describe('root pause protocol for local subagents', () => {
     expect(manifest.forced).toBe(0)
     expect(manifest.jobs).toEqual([{
       id: 'job-root-1',
-      kind: 'workflow',
+      kind: 'research',
       owner: rootId,
       ownerKind: 'root',
       status: 'running',
       disposition: 'recorded',
     }])
-    // Ticket 06 records jobs only; it never kills them.
+    // Only workflow/bash/pwsh work has a pause stop policy.
+    expect(jobs.kill).not.toHaveBeenCalled()
     expect(idle.cancelCalls).toEqual([])
   })
 
@@ -532,6 +746,170 @@ describe('root pause protocol for local subagents', () => {
     // The parked turn is stopped, not released back to the model.
     expect(child.batches).toEqual([])
     expect(child.cancelCalls).toContainEqual([{ kind: 'parent' }, { keepInbox: true }])
+  })
+
+  it('stops a bash job, then Play instructs the root to restart it rather than resuming it', async () => {
+    const jobs = new FakeJobs()
+    const world = createWorld({ drainMs: 10, jobs })
+    const rootId = String(world.root.session.id)
+    const job = jobs.add({ kind: 'bash', label: 'pnpm test', owner: rootId })
+
+    world.pause.pause(world.root)
+    await waitFor(() => latestManifest(world.root)?.phase === 'paused', 'bash job stopped')
+
+    const paused = latestManifest(world.root)!
+    expect(paused.jobs).toEqual([
+      expect.objectContaining({
+        id: job.id,
+        kind: 'bash',
+        label: 'pnpm test',
+        disposition: 'stopped',
+        status: 'killed',
+      }),
+    ])
+    expect(paused.warning).toContain('Play will restart it')
+    expect(paused.warning).toContain('not a resume')
+
+    const outcome = await world.pause.resumeAsync(world.root)
+    expect(outcome.ok).toBe(true)
+    expect(outcome.text).toMatch(/restart/i)
+    expect(outcome.text).toMatch(/run-level resume/i)
+
+    const resumed = latestManifest(world.root)!
+    expect(resumed.phase).toBe('resumed')
+    expect(resumed.jobs[0]?.disposition).toBe('restart-required')
+    expect(resumed.restartInstruction).toContain('pnpm test')
+    expect(resumed.restartInstruction).toMatch(/restart/i)
+    expect(resumed.restartInstruction).toMatch(/run-level resume/i)
+    // The restart instruction is for the root session only.
+    expect(world.subagents.sendMessage).not.toHaveBeenCalled()
+    const injected = (world.root.inject as unknown as {
+      mock: { calls: unknown[][] }
+    }).mock.calls.map(call => JSON.stringify(call[0]))
+    expect(injected.some(text => text.includes('pnpm test'))).toBe(true)
+  })
+
+  it('records a visible stop failure and never reports an unstopped job as paused or restartable', async () => {
+    const jobs = new FakeJobs()
+    jobs.killError = new Error('producer refused to cancel')
+    const world = createWorld({ drainMs: 5, jobs })
+    const rootId = String(world.root.session.id)
+    world.root.session.append('tool-workflow/run-start', { runId: 'run-1', name: 'audit' })
+    const job = jobs.add({ kind: 'workflow', label: 'audit', owner: rootId })
+
+    world.pause.pause(world.root)
+    await waitFor(() => latestManifest(world.root)?.phase === 'paused', 'failed stop recorded')
+
+    const manifest = latestManifest(world.root)!
+    expect(manifest.jobs[0]).toMatchObject({
+      id: job.id,
+      kind: 'workflow',
+      disposition: 'stop-failed',
+      status: 'running',
+    })
+    expect(manifest.jobs[0]?.warning).toContain('could not be stopped')
+    expect(manifest.jobs[0]?.warning).toContain('may still be running')
+    expect(manifest.warning).toContain('producer refused to cancel')
+    expect(manifest.workflows?.[0]).toMatchObject({
+      runId: 'run-1',
+      state: 'stop-failed',
+    })
+    expect(manifest.workflows?.[0]?.warning).toContain('could not be stopped')
+    // No silent spend: the job is not claimed stopped or paused.
+    expect(manifest.jobs[0]?.disposition).not.toBe('stopped')
+
+    const outcome = await world.pause.resumeAsync(world.root)
+    expect(outcome.text).toContain('could not be stopped')
+    const resumed = latestManifest(world.root)!
+    expect(resumed.jobs[0]?.disposition).toBe('stop-failed')
+    expect(resumed.restartInstruction).toContain('could not be stopped')
+    expect(resumed.restartInstruction).not.toContain('Re-run its command')
+  })
+
+  it('lets a workflow job finish during the drain instead of killing and restarting it', async () => {
+    const jobs = new FakeJobs()
+    const world = createWorld({ drainMs: 20, jobs })
+    const rootId = String(world.root.session.id)
+    world.root.session.append('tool-workflow/run-start', { runId: 'run-1', name: 'audit' })
+    const job = jobs.add({ kind: 'workflow', label: 'audit', owner: rootId })
+    setTimeout(() => { job.status = 'completed' }, 2)
+
+    world.pause.pause(world.root)
+    await waitFor(() => latestManifest(world.root)?.phase === 'paused', 'drain settlement recorded')
+
+    const manifest = latestManifest(world.root)!
+    expect(manifest.jobs[0]).toMatchObject({ id: job.id, disposition: 'settled', status: 'completed' })
+    expect(jobs.kills).toEqual([])
+    expect(manifest.workflows?.[0]).toMatchObject({ runId: 'run-1', state: 'settled' })
+    expect(manifest.warning).toBeUndefined()
+
+    const outcome = await world.pause.resumeAsync(world.root)
+    expect(outcome.text).not.toMatch(/restart/i)
+    expect(latestManifest(world.root)?.restartInstruction).toBeUndefined()
+    expect(latestManifest(world.root)?.jobs[0]?.disposition).toBe('settled')
+  })
+
+  it('still instructs a restart for a workflow job with no durable run record', async () => {
+    const jobs = new FakeJobs()
+    const world = createWorld({ drainMs: 5, jobs })
+    const rootId = String(world.root.session.id)
+    const job = jobs.add({ kind: 'workflow', label: 'ad-hoc audit', owner: rootId })
+
+    world.pause.pause(world.root)
+    await waitFor(() => latestManifest(world.root)?.phase === 'paused', 'workflow job stopped')
+
+    const outcome = await world.pause.resumeAsync(world.root)
+    expect(outcome.text).toContain('ad-hoc audit')
+    expect(outcome.text).toMatch(/restart/i)
+    expect(outcome.text).toMatch(/run-level resume/i)
+    const resumed = latestManifest(world.root)!
+    expect(resumed.jobs[0]?.disposition).toBe('restart-required')
+    expect(resumed.restartInstruction).toContain('ad-hoc audit')
+    expect(resumed.restartInstruction).toMatch(/saved plan/i)
+  })
+
+  it('stops a job registered while the pause is draining', async () => {
+    const jobs = new FakeJobs()
+    const world = createWorld({ drainMs: 5, jobs })
+    const rootId = String(world.root.session.id)
+    const late: FakeJobView = {
+      id: 'job-late',
+      kind: 'bash',
+      label: 'late build',
+      owner: rootId,
+      status: 'running',
+      startedAt: Date.now(),
+      output: { total: 0, earliest: 0 },
+    }
+    let lists = 0
+    jobs.onList = () => {
+      lists += 1
+      // The first listing is the initial snapshot; a tool step can register a
+      // new job before the pause drain finishes. The stop pass re-lists.
+      if (lists > 1 && !jobs.views.some(view => view.id === late.id)) jobs.views.push(late)
+    }
+
+    world.pause.pause(world.root)
+    await waitFor(() => latestManifest(world.root)?.phase === 'paused', 'late job stopped')
+
+    expect(latestManifest(world.root)?.jobs).toEqual([
+      expect.objectContaining({ id: late.id, kind: 'bash', disposition: 'stopped' }),
+    ])
+    expect(jobs.kills).toEqual([{ id: late.id, caller: rootId, reason: 'paused by user' }])
+  })
+
+  it('records but does not stop an unowned job', async () => {
+    const jobs = new FakeJobs()
+    const world = createWorld({ drainMs: 5, jobs })
+    const job = jobs.add({ kind: 'bash', label: 'shared build' })
+
+    world.pause.pause(world.root)
+    await waitFor(() => latestManifest(world.root)?.phase === 'paused', 'unowned job recorded')
+
+    expect(latestManifest(world.root)?.jobs).toEqual([
+      expect.objectContaining({ id: job.id, kind: 'bash', disposition: 'recorded' }),
+    ])
+    expect(jobs.kills).toEqual([])
   })
 
   it('cancels the pause and releases parked children when the user starts a new direction', async () => {

@@ -214,6 +214,45 @@ describe('primary composer action presentation', () => {
     })
   })
 
+  it('warns that stopped background work restarts rather than resumes', () => {
+    const warning = 'Background bash job job-1 (pnpm test) was stopped at pause and has no checkpoint; '
+      + 'Play will restart it. This is a restart, not a resume.'
+    const state = owner({
+      paused: true,
+      pause: { phase: 'paused', acknowledged: 0, total: 0, forced: 0, warning },
+    })
+    const view = primaryView(state)
+    expect(view).toMatchObject({ kind: 'play', disabled: false, label: 'resume' })
+    expect(primaryText(view, translate(en))).toEqual({
+      label: `Resume — Restart required: ${warning}`,
+      title: `Resume — Restart required: ${warning}`,
+      status: `Restart required: ${warning}`,
+    })
+    expect(primaryText(view, translate(zh))).toEqual({
+      label: `继续 — 需要重启：${warning}`,
+      title: `继续 — 需要重启：${warning}`,
+      status: `需要重启：${warning}`,
+    })
+  })
+
+  it('combines a forced-stop fact with a restart warning on Play', () => {
+    const state = owner({
+      paused: true,
+      pause: {
+        phase: 'paused',
+        acknowledged: 1,
+        total: 1,
+        forced: 2,
+        warning: 'Workflow "audit" was stopped; restart its workflow.',
+      },
+    })
+    expect(primaryText(primaryView(state), translate(en))).toEqual({
+      label: 'Resume — Paused — 2 stopped after timeout Restart required: Workflow "audit" was stopped; restart its workflow.',
+      title: 'Resume — Paused — 2 stopped after timeout Restart required: Workflow "audit" was stopped; restart its workflow.',
+      status: 'Paused — 2 stopped after timeout Restart required: Workflow "audit" was stopped; restart its workflow.',
+    })
+  })
+
   it('disables Play while the resume command is releasing children', () => {
     expect(primaryView(owner({
       paused: true,

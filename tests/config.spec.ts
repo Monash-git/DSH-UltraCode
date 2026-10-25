@@ -8,9 +8,12 @@ describe('config', () => {
     expect(config.maxDurationMs).toBe(60 * 60 * 1000)
     expect(config.noProgressRounds).toBe(3)
     expect(config.pauseTimeoutMs).toBe(60_000)
+    expect(config.pauseDrainMs).toBe(2_000)
     expect(resolveConfig({ pauseTimeoutMs: 25 }).pauseTimeoutMs).toBe(25)
+    expect(resolveConfig({ pauseDrainMs: 25 }).pauseDrainMs).toBe(25)
     expect(() => resolveConfig({ maxRounds: 0 })).toThrow(/positive integer/)
     expect(() => resolveConfig({ pauseTimeoutMs: 0 })).toThrow(/positive integer/)
+    expect(() => resolveConfig({ pauseDrainMs: 0 })).toThrow(/positive integer/)
     expect(() => resolveConfig({ maxDurationMs: 1.5 })).toThrow(/positive integer/)
   })
 

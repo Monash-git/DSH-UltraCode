@@ -167,22 +167,48 @@ class FakeJobs extends Service {
   list(caller) {
     return this.state.views.filter(view => view.owner === undefined || view.owner === caller)
   }
+
+  kill(id, caller, reason) {
+    const view = this.state.views.find(candidate => candidate.id === id)
+    if (view === undefined) throw new Error(`unknown job ${id}`)
+    if (view.owner !== undefined && view.owner !== caller) throw new Error(`job ${id} belongs to another session`)
+    if (view.status !== 'running' && view.status !== 'stopping') return 'already-finished'
+    this.state.kills.push({ id, caller, reason })
+    view.status = 'killed'
+    return 'requested'
+  }
+
+  async wait(id, timeoutMs, caller) {
+    const view = this.state.views.find(candidate => candidate.id === id)
+    if (view === undefined) throw new Error(`unknown job ${id}`)
+    if (view.owner !== undefined && view.owner !== caller) throw new Error(`job ${id} belongs to another session`)
+    if (view.status === 'running' || view.status === 'stopping') {
+      await new Promise(resolve => setTimeout(resolve, Math.min(timeoutMs, 5)))
+    }
+    return { ...view }
+  }
 }
 
 function createJobsState() {
   const views = []
+  const kills = []
   let nextId = 0
   return {
     views,
-    live(owner, label = 'fake workflow') {
+    kills,
+    live(owner, label = 'fake workflow', kind = 'workflow', spillPaths = undefined) {
       const view = {
         id: `job-${nextId += 1}`,
-        kind: 'workflow',
+        kind,
         label,
         owner,
         status: 'running',
         startedAt: Date.now(),
-        output: { total: 0, earliest: 0 },
+        output: {
+          total: 0,
+          earliest: 0,
+          ...spillPaths === undefined ? {} : { spillPaths },
+        },
       }
       views.push(view)
       return view
@@ -1498,8 +1524,89 @@ async function scenarioSessionQueryComposition() {
   }
 }
 
+async function scenarioWorkflowBashPause() {
+  const h = await createHarness([
+    toolCallResponse('call-wait', 'wait_tool', {}, 'Working.'),
+    textResponse('Background work restarted.'),
+  ], { waitTool: true, jobsService: true, pluginConfig: { pauseDrainMs: 20 } })
+  try {
+    h.agent.followup(user('run the background checks'))
+    await withTimeout(h.wait.started, 'workflow/bash pause wait start')
+    const workflowJob = h.jobs.live(
+      h.agent.session.id,
+      'audit workflow',
+      'workflow',
+      ['C:/tmp/runtime-audit.log'],
+    )
+    const bashJob = h.jobs.live(h.agent.session.id, 'pnpm test', 'bash')
+    h.agent.session.append('tool-workflow/run-start', { runId: 'run-runtime', name: 'audit workflow' })
+    h.agent.session.append('tool/call', {
+      turn: 1,
+      step: 1,
+      callId: ToolCallId('call-workflow-runtime'),
+      name: 'workflow',
+      arguments: JSON.stringify({
+        meta: { name: 'audit workflow' },
+        script: 'phase("scan")\nreturn await agent("inspect")',
+      }),
+    })
+    h.agent.session.append('tool-workflow/agent-start', {
+      runId: 'run-runtime',
+      seq: 1,
+      label: 'audit child',
+      childId: SessionId('runtime-audit-child'),
+    })
+
+    const paused = await h.ctx.commands.execute(h.agent, '/pause', [], new AbortController().signal)
+    assert.ok(paused, 'the pause command should be registered')
+    h.wait.release()
+    await waitForCondition(
+      () => latestPauseManifest(h.agent)?.phase === 'paused',
+      'runtime workflow/bash pause',
+    )
+    const manifest = latestPauseManifest(h.agent)
+    const workflow = manifest.jobs.find(job => job.id === workflowJob.id)
+    const bash = manifest.jobs.find(job => job.id === bashJob.id)
+    assert.equal(workflow?.disposition, 'stopped', 'the workflow job should be stopped')
+    assert.equal(bash?.disposition, 'stopped', 'the bash job should be stopped')
+    assert.equal(bash?.kind, 'bash')
+    assert.equal(h.jobs.kills.length, 2, 'both jobs should receive a kill request')
+    assert.ok(
+      h.jobs.kills.every(kill => kill.caller === h.agent.session.id),
+      'the root owns both kill requests',
+    )
+    const capture = manifest.workflows.find(run => run.runId === 'run-runtime')
+    assert.ok(capture?.plan?.includes('phase("scan")'), 'the original workflow script is the saved plan')
+    assert.deepEqual(capture.childIds, ['runtime-audit-child'])
+    assert.deepEqual(capture.artifacts, ['C:/tmp/runtime-audit.log'])
+    assert.equal(capture.state, 'stopped')
+    assert.ok(manifest.warning.includes('Play will restart it'), 'the bash restart warning is visible')
+
+    const resumed = await h.ctx.commands.execute(h.agent, '/resume', [], new AbortController().signal)
+    assert.ok(resumed, 'the resume command should be registered')
+    await withTimeout(h.agent.whenIdle(), 'runtime workflow/bash resume')
+    await waitForCondition(
+      () => latestPauseManifest(h.agent)?.phase === 'resumed',
+      'runtime workflow/bash resumed',
+    )
+    const after = latestPauseManifest(h.agent)
+    assert.equal(after.jobs.find(job => job.id === workflowJob.id)?.disposition, 'restart-required')
+    assert.equal(after.jobs.find(job => job.id === bashJob.id)?.disposition, 'restart-required')
+    assert.ok(after.restartInstruction.includes('audit workflow'))
+    assert.ok(after.restartInstruction.includes('pnpm test'))
+    assert.ok(after.restartInstruction.includes('run-level resume'))
+    const resumedRequest = requestText(h.adapter.requests.at(-1))
+    assert.ok(resumedRequest.includes('run-level resume'), 'the root receives the restart instruction')
+    assert.ok(!resumedRequest.includes('Ultra host pause'), 'no host control reaches a model')
+    return { scenario: 'workflow-bash-pause', jobs: 2, requests: h.adapter.requests.length }
+  } finally {
+    await h.handle.dispose()
+  }
+}
+
 const results = []
 for (const scenario of [
+  scenarioWorkflowBashPause,
   scenarioTdd,
   scenarioTaskState,
   scenarioReplyFirst,

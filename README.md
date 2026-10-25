@@ -118,10 +118,20 @@ Play releases parked turns in place, warm-resumes resident children, and
 cold-resumes disposed children through `ctx.subagents`; when cold resume is
 unavailable, the manifest carries a restart-from-checkpoint warning. Workflow
 children are only ever parked this way, never sent a normal finish message, so
-their pending workflow result is not corrupted; a workflow child that was
-stopped instead of parked is reported as job-owned and left to its workflow run
-rather than independently resumed. Their job ids and owned jobs are recorded in
-the manifest for the workflow/bash pause ticket.
+their pending workflow result is not corrupted.
+
+Workflow and bash jobs have no pause primitive. After the child park drain,
+pause stops every live workflow/bash/pwsh job through the host jobs service and
+waits a short bounded drain for settlement. The manifest records each job's
+kind, label, owner, status, captured output paths, and disposition. A job that
+cannot be stopped is recorded as `stop-failed` with a visible warning and is
+never reported as paused or stopped; pause does not silently leave background
+work spending. A workflow run is captured with its original script (the saved
+plan), the job's output paths, the workspace, and every member child Session
+id. Play never claims a run-level resume: it sends the root a restart
+instruction that restarts workflow work from the saved plan/artifacts and
+re-runs a stopped bash command only if still needed. The primary control shows
+the restart warning, and `/resume` reports the same outcome.
 
 The control is a native occupant of DSH's optional
 `conversation.input.primary` slot. It renders the shipped primary action
@@ -168,12 +178,14 @@ invariants with a mock adapter.
 - DSH's workflow tool has no resume/journaling, nested workflows, token budget,
   saved workflows, per-agent effort/isolation/agentType, or worktree isolation.
 - DSH has no Claude-style usage-limit pause; Ultra can spend more tokens.
-- Background workflow jobs are jobs, not autopilot; pausing records the job ids
-  in the pause manifest but does not cancel or restart the jobs (that is the
-  workflow/bash pause ticket). A completion wake while paused is held durably
-  and released only by Play. After a process restart the recorded jobs no
-  longer exist, and the pause reports that they must be restarted from the
-  saved plan or checkpoint.
+- Background workflow jobs are jobs, not autopilot. Pause stops them after a
+  bounded drain and Play restarts workflow work from the saved plan/artifacts
+  and member sessions; the DSH workflow engine has no journal, so run-level
+  resume is not available. If a job cannot be stopped, the manifest and UI show
+  a `stop-failed` warning instead of claiming a pause. A completion wake while
+  paused is held durably and released only by Play. After a process restart the
+  recorded jobs no longer exist, and the pause reports that they must be
+  restarted from the saved plan or checkpoint.
 - The local-child park uses DSH's awaited `agent/pre-step` boundary to hold a
   turn open. It is plugin-only and deliberately not a core suspend gate: an
   in-flight tool still has to settle before the child can reach its park point,

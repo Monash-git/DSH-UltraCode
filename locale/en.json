@@ -6,5 +6,6 @@
   "running": "Running",
   "waitingJob": "Waiting for background job",
   "pausingProgress": "Pausing… ({acknowledged}/{total} acknowledged)",
-  "pausedForced": "Paused — {forced} stopped after timeout"
+  "pausedForced": "Paused — {forced} stopped after timeout",
+  "restartWarning": "Restart required: {warning}"
 }
