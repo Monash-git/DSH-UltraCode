@@ -57,7 +57,7 @@ export const inject = ['tools', 'commands', 'workingDirectory']
 export function apply(ctx: Context, config: PluginConfig = {}): void {
   const settings = resolveConfig(config)
   const runs = new Map<string, RunState>()
-  const liveAgents = new Map<string, Agent>()
+  const hydrated = new Set<string>()
   const pause = new PauseController(settings, runs)
   const defaultSelection = (): { provider: string; model: string; reasoningEffort?: string } | undefined => {
     const service = (ctx as unknown as {
@@ -104,21 +104,41 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
   }
   const commands: CommandContext = { runs, pause, ultra, selectMax }
 
-  ctx.effect(() => () => {
-    for (const agent of liveAgents.values()) {
-      try {
-        const run = runs.get(sessionKey(agent))
-        if (run !== undefined && isUnfinishedPhase(run.phase)) {
-          run.phase = 'cancelled'
-          run.reason = 'plugin unloaded'
-          appendRunEvent(agent, run)
-        }
-        selectMax(agent)
-      } catch (error: unknown) {
-        console.error('[dsh-ultracode] unload cleanup failed:', error)
-      }
+  /**
+   * Rebuild this instance's in-memory view from the durable log. A hot reload
+   * creates a new plugin instance while agents stay live, so `agent/created`
+   * will not fire for them again; `live` also tells pause restoration not to
+   * treat the reload as a session restart. Existing sessions are read, never
+   * rewritten.
+   */
+  const restoreAgent = (agent: Agent, live: boolean): void => {
+    const key = sessionKey(agent)
+    if (hydrated.has(key)) return
+    hydrated.add(key)
+    const event = latestRunEvent(agent.session.snapshotEvents())
+    if (event !== undefined) runs.set(key, fromRunEvent(event, settings))
+    else runs.delete(key)
+    if (live) pause.hydrate(agent)
+    else pause.onCreated(agent)
+    ultra.onCreated(agent)
+    if (pause.isPaused(agent) || runs.get(key)?.phase === 'paused_resume') {
+      ultra.requestFullPlaybook(agent)
     }
-    liveAgents.clear()
+  }
+
+  const restoreLiveAgents = (scope: Context): void => {
+    const agents = (scope as unknown as {
+      get(name: string): unknown
+    }).get('agents') as { list(): readonly Agent[] } | undefined
+    for (const agent of agents?.list() ?? []) restoreAgent(agent, true)
+  }
+
+  // Disposal is a reload or an uninstall, never a reason to mutate a session.
+  // A true shutdown ends the live turn with the process; the durable run
+  // record is restored as `paused_resume` the next time the session loads.
+  ctx.effect(() => () => {
+    runs.clear()
+    hydrated.clear()
   })
 
   if (settings.ultraEffort) registerUltraEffort(ctx)
@@ -129,35 +149,29 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
 
   ctx.on('agent/created', ({ agent, source }) => {
     const key = sessionKey(agent)
-    liveAgents.set(key, agent)
     if (source === 'clear') {
+      hydrated.delete(key)
       runs.delete(key)
       pause.dispose(agent)
       ultra.dispose(agent)
       return undefined
     }
-    const events = agent.session.snapshotEvents()
-    const event = latestRunEvent(events)
-    if (event !== undefined) {
-      runs.set(key, fromRunEvent(event, settings))
-    } else {
-      runs.delete(key)
-    }
-    pause.onCreated(agent)
-    ultra.onCreated(agent)
-    if (pause.isPaused(agent) || runs.get(key)?.phase === 'paused_resume') {
-      ultra.requestFullPlaybook(agent)
-    }
+    restoreAgent(agent, false)
     return undefined
   })
 
   ctx.on('agent/disposed', ({ agent }: { agent: Agent }) => {
     const key = sessionKey(agent)
-    liveAgents.delete(key)
+    hydrated.delete(key)
     runs.delete(key)
     pause.dispose(agent)
     ultra.dispose(agent)
   })
+
+  // Restore live agents that outlived a previous plugin instance (hot reload).
+  // Keep the inject form so a late-mounted registry is still scanned once.
+  restoreLiveAgents(ctx)
+  ctx.inject(['agents'], scoped => restoreLiveAgents(scoped))
 
   ctx.on('agent/error', ({ agent, turn }: { agent: Agent; turn: number }) => {
     pause.onError(agent, turn)

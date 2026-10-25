@@ -24,7 +24,7 @@ import {
   todoSummary,
   type RunState,
 } from './state.js'
-import type { ClearReason, PauseReason } from './types.js'
+import type { ClearReason, PauseReason, UltracodePauseEvent } from './types.js'
 
 export interface PauseOutcome {
   readonly ok: boolean
@@ -43,23 +43,22 @@ export class PauseController {
     private readonly runs: Map<string, RunState>,
   ) {}
 
+  /**
+   * Load durable pause state for an agent that stays live across a plugin
+   * reload. A reload is not a session restart: an unfinished run is left
+   * untouched and no pause record is written.
+   */
+  hydrate(agent: Agent): void {
+    if (!isRootAgent(agent)) return
+    this.restorePaused(agent)
+  }
+
   /** Load durable state and promote a crash-interrupted turn to paused. */
   onCreated(agent: Agent): void {
     if (!isRootAgent(agent)) return
     const key = sessionKey(agent)
     const events = agent.session.snapshotEvents()
-    const pauseInfo = latestPauseInfo(events)
-    const latestPause = pauseInfo?.data
-    const pauseSeq = pauseInfo?.seq ?? -1
-    if (latestPause?.paused === true) {
-      this.paused.set(key, {
-        reason: latestPause.reason,
-        turn: latestPause.turn,
-        atSeq: latestPause.atSeq,
-      })
-    } else {
-      this.paused.delete(key)
-    }
+    const { latestPause, pauseSeq } = this.restorePaused(agent)
 
     const run = this.runs.get(key)
     if (run !== undefined && run.phase === 'waiting_user') {
@@ -81,6 +80,26 @@ export class PauseController {
     if (hasHumanMessageAfter(events, end.seq)) return
     if (latestPause !== undefined && !latestPause.paused && pauseSeq > end.seq) return
     this.markPaused(agent, 'interrupted', end.turn)
+  }
+
+  /** Fold the newest durable pause record into the in-memory view. */
+  private restorePaused(agent: Agent): {
+    latestPause: UltracodePauseEvent | undefined
+    pauseSeq: number
+  } {
+    const key = sessionKey(agent)
+    const pauseInfo = latestPauseInfo(agent.session.snapshotEvents())
+    const latestPause = pauseInfo?.data
+    if (latestPause?.paused === true) {
+      this.paused.set(key, {
+        reason: latestPause.reason,
+        turn: latestPause.turn,
+        atSeq: latestPause.atSeq,
+      })
+    } else {
+      this.paused.delete(key)
+    }
+    return { latestPause, pauseSeq: pauseInfo?.seq ?? -1 }
   }
 
   /** Clear a paused state when the user starts a new direction. */

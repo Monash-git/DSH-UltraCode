@@ -1,4 +1,5 @@
-import { SESSION_FORMAT_VERSION, Session, SessionId } from '@deepseek-ai/dsh-session'
+import { SESSION_FORMAT_VERSION, Session, SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { validateStoredEvents } from '@deepseek-ai/dsh-session-persistence'
 import { describe, expect, it } from 'vitest'
 import type { TodoItem } from '../src/state.js'
 import { resolveConfig } from '../src/config.js'
@@ -7,11 +8,13 @@ import {
   appendRunEvent,
   createRunState,
   fromRunEvent,
+  hasPriorTurn,
   inboxHasUserWork,
   isRootAgent,
   isUnfinishedPhase,
   latestModeEvent,
   latestModelSelection,
+  latestPauseEvent,
   latestRunEvent,
   openTurn,
   sessionKey,
@@ -28,6 +31,10 @@ function carrier(): SessionCarrier {
   return { session: Session.create(SessionId('test-session')) }
 }
 
+function legacyEvent(type: string, data: unknown, seq: number, ignorable = true): SessionEvent {
+  return { type, data, seq, time: 0, ...ignorable ? { ignorable: true as const } : {} } as unknown as SessionEvent
+}
+
 describe('run state', () => {
   it('creates a run with the wayfinder budget', () => {
     const run = createRunState('wayfinder', resolveConfig())
@@ -36,6 +43,46 @@ describe('run state', () => {
     expect(run.round).toBe(1)
     expect(run.maxRounds).toBe(120)
     expect(run.maxDurationMs).toBe(60 * 60 * 1000)
+  })
+
+  it('reads a legacy log whose plugin events predate the plugin-record envelope', () => {
+    const id = SessionId('legacy-session')
+    const seed: SessionEvent[] = [
+      legacyEvent('model/selection', {
+        provider: 'deepseek-official',
+        model: 'mock',
+        reasoningEffort: 'max',
+      }, 0),
+      legacyEvent('autopilot/run', {
+        runId: 'legacy-run',
+        skill: 'tdd',
+        phase: 'paused_user',
+        round: 2,
+        maxRounds: 60,
+        startedAt: 1,
+        updatedAt: 2,
+      }, 1),
+      legacyEvent('ultracode/mode', { enabled: true, source: 'selector', updatedAt: 2 }, 2),
+      legacyEvent('ultracode/pause', {
+        paused: true,
+        reason: 'user',
+        turn: 1,
+        atSeq: 2,
+        updatedAt: 2,
+      }, 3),
+      legacyEvent('turn/start', { turn: 1 }, 4, false),
+      legacyEvent('turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 5, false),
+    ]
+    const session = Session.create(id, seed)
+    const events = session.snapshotEvents()
+    const header = { version: SESSION_FORMAT_VERSION, id, createdAt: 0, isSeeded: false }
+
+    expect(() => validateStoredEvents(header, [...events])).not.toThrow()
+    expect(latestModelSelection(events)?.reasoningEffort).toBe('max')
+    expect(latestRunEvent(events)?.phase).toBe('paused_user')
+    expect(latestModeEvent(events)?.enabled).toBe(true)
+    expect(latestPauseEvent(events)?.paused).toBe(true)
+    expect(hasPriorTurn({ session })).toBe(true)
   })
 
   it('round-trips run and mode events through the session log', () => {

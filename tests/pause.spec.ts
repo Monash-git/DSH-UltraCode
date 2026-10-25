@@ -4,7 +4,14 @@ import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { describe, expect, it, vi } from 'vitest'
 import { resolveConfig } from '../src/config.js'
 import { PauseController } from '../src/pause.js'
-import { appendRunEvent, createRunState, latestPauseEvent, latestRunEvent, sessionKey } from '../src/state.js'
+import {
+  appendPauseEvent,
+  appendRunEvent,
+  createRunState,
+  latestPauseEvent,
+  latestRunEvent,
+  sessionKey,
+} from '../src/state.js'
 
 function fakeAgent(status: 'idle' | 'running' = 'running') {
   const session = Session.create(SessionId(`pause-${Math.random().toString(36).slice(2)}`))
@@ -56,6 +63,74 @@ describe('PauseController', () => {
     const outcome = pause.onTurnStopping(agent, 1, signal.signal)
     expect(outcome).toBe('paused')
     expect(pause.isPaused(agent)).toBe(true)
+  })
+
+  it('restores durable pause state on a live reload without recording a restart', () => {
+    const { agent, pause, runs } = setup('running')
+    const run = createRunState('tdd', resolveConfig())
+    run.phase = 'running'
+    runs.set(sessionKey(agent), run)
+    appendRunEvent(agent, run)
+    appendPauseEvent(agent, {
+      paused: true,
+      reason: 'user',
+      turn: 1,
+      atSeq: 2,
+      updatedAt: Date.now(),
+    })
+    const before = agent.session.snapshotEvents()
+
+    pause.hydrate(agent)
+
+    expect(pause.isPaused(agent)).toBe(true)
+    expect(pause.reasonOf(agent)).toBe('user')
+    expect(agent.session.snapshotEvents()).toEqual(before)
+    expect(latestRunEvent(agent.session.snapshotEvents())?.phase).toBe('running')
+  })
+
+  it('does not pause a running session just because the plugin reloaded', () => {
+    const { agent, pause, runs } = setup('running')
+    const run = createRunState('tdd', resolveConfig())
+    run.phase = 'running'
+    runs.set(sessionKey(agent), run)
+    appendRunEvent(agent, run)
+
+    pause.hydrate(agent)
+
+    expect(pause.isPaused(agent)).toBe(false)
+    expect(latestPauseEvent(agent.session.snapshotEvents())).toBeUndefined()
+    expect(latestRunEvent(agent.session.snapshotEvents())?.phase).toBe('running')
+  })
+
+  it('loads an old paused session without appending another pause record', () => {
+    const { agent, pause } = setup('idle')
+    appendPauseEvent(agent, {
+      paused: true,
+      reason: 'user',
+      turn: 1,
+      atSeq: 0,
+      updatedAt: Date.now(),
+    })
+    const before = agent.session.snapshotEvents()
+
+    pause.onCreated(agent)
+
+    expect(pause.isPaused(agent)).toBe(true)
+    expect(pause.reasonOf(agent)).toBe('user')
+    expect(agent.session.snapshotEvents()).toEqual(before)
+  })
+
+  it('promotes an unfinished run to paused_resume when a persisted session loads', () => {
+    const { agent, pause, runs } = setup('idle')
+    const run = createRunState('tdd', resolveConfig())
+    run.phase = 'running'
+    runs.set(sessionKey(agent), run)
+    appendRunEvent(agent, run)
+
+    pause.onCreated(agent)
+
+    expect(pause.isPaused(agent)).toBe(true)
+    expect(latestRunEvent(agent.session.snapshotEvents())?.phase).toBe('paused_resume')
   })
 
   it('restores an interrupted turn from the log on agent creation', () => {

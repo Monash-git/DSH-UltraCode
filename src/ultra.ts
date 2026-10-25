@@ -19,6 +19,7 @@ import {
 import {
   appendModeEvent,
   hasFullPlaybookSinceCompaction,
+  hasPriorTurn,
   hasReminderForTurn,
   isRootAgent,
   latestModeEvent,
@@ -62,22 +63,26 @@ export class UltraModeController {
   isSelectorUltra(agent: Agent): boolean {
     const selection = latestModelSelection(agent.session.snapshotEvents())
     if (selection !== undefined) return selection.reasoningEffort === 'ultra'
+    if (hasPriorTurn(agent)) return false
     return this.defaultSelection?.()?.reasoningEffort === 'ultra'
   }
 
   /** Read the selected effort, for status output. */
   selectedEffort(agent: Agent): string | undefined {
-    return latestModelSelection(agent.session.snapshotEvents())?.reasoningEffort
-      ?? this.defaultSelection?.()?.reasoningEffort
+    const selection = latestModelSelection(agent.session.snapshotEvents())
+    if (selection !== undefined) return selection.reasoningEffort
+    return hasPriorTurn(agent) ? undefined : this.defaultSelection?.()?.reasoningEffort
   }
 
   /**
-   * Carry an Ultra default into a session that has no selection event. DSH's
-   * blank draft keeps the selector choice client-side; the session created on
-   * the first send otherwise starts without it and the request header (max)
-   * makes the UI fall back to Max.
+   * Carry an Ultra default into a blank new session: no selection event and no
+   * turn yet. DSH's blank draft keeps the selector choice client-side; the
+   * session created on the first send otherwise starts without it and the
+   * request header (max) makes the UI fall back to Max. Existing sessions are
+   * deliberately never mutated just because Ultra is the current default.
    */
   private ensureDefaultSelection(agent: Agent): void {
+    if (hasPriorTurn(agent)) return
     if (latestModelSelection(agent.session.snapshotEvents()) !== undefined) return
     const selection = this.defaultSelection?.()
     if (selection?.reasoningEffort !== 'ultra') return

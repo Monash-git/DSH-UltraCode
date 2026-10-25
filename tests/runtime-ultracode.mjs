@@ -195,7 +195,14 @@ async function createHarness(script, options = {}) {
   await ctx.plugin(SkillRegistry)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(AgentLoop, { agents: [] })
-  if (options.plugins !== 'skills') await ctx.plugin(ultraPlugin, options.pluginConfig ?? {})
+  let ultraFiber
+  if (options.plugins !== 'skills') {
+    if (options.defaultModel !== undefined) {
+      const { default: AgentDefaultModelConfig } = await import(pkg('dsh-agent-default-model/lib/index.js'))
+      await ctx.plugin(AgentDefaultModelConfig, options.defaultModel)
+    }
+    ultraFiber = await ctx.plugin(ultraPlugin, options.pluginConfig ?? {})
+  }
   if (options.plugins !== 'ultra') await ctx.plugin(skillsPlugin)
 
   const wait = options.waitTool === true ? createWaitTool() : undefined
@@ -215,10 +222,29 @@ async function createHarness(script, options = {}) {
           reasoningEffort: 'ultra',
         }))
       }
+      if (options.applySelection === true) {
+        // Minimal stand-in for the API session controller's selection policy:
+        // the latest durable selection drives the next request.
+        agentCtx.on('agent/request', async ({ agent }, next) => {
+          const resolved = await next()
+          const selection = agent.session.snapshotEvents()
+            .findLast(event => event.type === 'model/selection')
+          if (selection === undefined) return resolved
+          const { reasoningEffort: _inheritedEffort, ...rest } = resolved
+          return {
+            ...rest,
+            provider: selection.data.provider,
+            model: selection.data.model,
+            ...selection.data.reasoningEffort === undefined
+              ? {}
+              : { reasoningEffort: selection.data.reasoningEffort },
+          }
+        })
+      }
     },
   })
   await new Promise(resolve => setTimeout(resolve, 10))
-  return { ctx, adapter, agent: handle.agent, handle, wait, workflow }
+  return { ctx, adapter, agent: handle.agent, handle, wait, workflow, ultraFiber }
 }
 
 function user(text) {
@@ -326,6 +352,107 @@ async function scenarioUltra() {
     assert.ok(!second.includes('autopilot_continue'), 'Ultra must not append an autopilot nudge')
     assertCacheStable(h.adapter.requests[0], h.adapter.requests[1], h.agent.session.snapshotEvents())
     return { scenario: 'ultra', requests: h.adapter.requests.length, phases: runPhases(h.agent) }
+  } finally {
+    await h.handle.dispose()
+  }
+}
+
+async function scenarioBlankCarry() {
+  const h = await createHarness([
+    textResponse('Hello.'),
+    textResponse('Existing session.'),
+  ], {
+    defaultModel: {
+      provider: 'deepseek-official',
+      model: 'mock',
+      reasoningEffort: 'ultra',
+    },
+    applySelection: true,
+  })
+  try {
+    const selection = h.agent.session.snapshotEvents().findLast(event => event.type === 'model/selection')
+    assert.equal(selection?.data.reasoningEffort, 'ultra', 'a blank session should carry the Ultra default')
+    h.agent.followup(user('hello'))
+    await withTimeout(h.agent.whenIdle(), 'blank carry scenario')
+    assert.equal(h.adapter.requests.length, 1, 'a blank session should run one normal turn')
+    assert.equal(h.adapter.requests[0].reasoningEffort, 'max', 'the carried Ultra must map to max on the wire')
+    assert.ok(
+      JSON.stringify(h.adapter.requests[0].messages).includes('[ultracode:standing]'),
+      'the carried Ultra should arm the standing playbook',
+    )
+
+    const existing = await h.ctx.agents.create({
+      sessionId: SessionId('existing-session-seeded'),
+      seed: [
+        { type: 'turn/start', data: { turn: 1 }, seq: 0, time: 0 },
+        { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } }, seq: 1, time: 0 },
+      ],
+      agentOptions: { provider: 'deepseek-official', model: 'mock' },
+      setup: async agentCtx => { await agentCtx.plugin(toolSkill) },
+    })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    const existingEvents = existing.agent.session.snapshotEvents()
+    assert.ok(
+      !existingEvents.some(event => event.type === 'model/selection'),
+      'an existing session must not be mutated by the Ultra default',
+    )
+    existing.agent.followup(user('continue'))
+    await withTimeout(existing.agent.whenIdle(), 'existing session scenario')
+    assert.ok(
+      !JSON.stringify(h.adapter.requests.at(-1)?.messages).includes('[ultracode:standing]'),
+      'an existing session without a selection must not arm Ultra',
+    )
+    await existing.dispose()
+    return { scenario: 'blank-carry', requests: h.adapter.requests.length }
+  } finally {
+    await h.handle.dispose()
+  }
+}
+
+async function scenarioReload() {
+  const h = await createHarness([
+    toolCallResponse('call-wait', 'wait_tool', {}, 'Waiting.'),
+    textResponse('I will stop here.'),
+    toolCallResponse('call-complete', 'complete_run', { summary: 'reload complete' }, 'Completing.'),
+  ], { waitTool: true })
+  try {
+    h.agent.session.append('model/selection', {
+      provider: 'deepseek-official',
+      model: 'mock',
+      reasoningEffort: 'ultra',
+    })
+    h.agent.followup(user('/tdd'))
+    await withTimeout(h.wait.started, 'reload wait start')
+    const selectionsBefore = h.agent.session.snapshotEvents()
+      .filter(event => event.type === 'model/selection')
+
+    await h.ultraFiber.dispose()
+
+    const afterUnload = h.agent.session.snapshotEvents()
+    assert.ok(!runPhases(h.agent).includes('cancelled'), 'unload must not cancel a live run')
+    assert.ok(!pauseRecords(h.agent).some(data => data.paused === true), 'unload must not pause the session')
+    assert.deepEqual(
+      afterUnload.filter(event => event.type === 'model/selection'),
+      selectionsBefore,
+      'unload must not rewrite the model selection',
+    )
+
+    h.ultraFiber = await h.ctx.plugin(ultraPlugin, {})
+    await new Promise(resolve => setTimeout(resolve, 10))
+    const status = await h.ctx.commands.execute(h.agent, '/autopilot status', [], new AbortController().signal)
+    assert.ok(
+      status?.result.text?.includes('running'),
+      `the reloaded plugin should restore the live run; got ${status?.result.text}`,
+    )
+
+    h.wait.release()
+    await withTimeout(h.agent.whenIdle(), 'reload settle')
+    assert.equal(h.adapter.requests.length, 3, 'the reloaded plugin should continue the same turn once more')
+    assert.ok(JSON.stringify(h.adapter.requests[2].messages).includes('autopilot_continue'),
+      'the reloaded plugin should resume the run without a new user turn')
+    assert.ok(runPhases(h.agent).includes('completed'), 'the restored run should complete')
+    assertCacheStable(h.adapter.requests[0], h.adapter.requests[1], h.agent.session.snapshotEvents())
+    return { scenario: 'reload', requests: h.adapter.requests.length, phases: runPhases(h.agent) }
   } finally {
     await h.handle.dispose()
   }
@@ -503,7 +630,9 @@ const results = []
 for (const scenario of [
   scenarioTdd,
   scenarioUltra,
+  scenarioBlankCarry,
   scenarioUltraWorkflow,
+  scenarioReload,
   scenarioSteer,
   scenarioPauseResume,
   scenarioAutopilotPause,

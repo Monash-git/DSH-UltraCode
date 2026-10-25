@@ -50,6 +50,30 @@ The control is a native slot contribution; it does not replace the Send/Stop
 button and does not use DOM/CSS injection. The Host commands `/pause` and
 `/resume` are the underlying actions.
 
+## Session lifecycle
+
+- An Ultra default is carried into a **blank new session** only: a session
+  with no `model/selection` and no prior turn. Existing sessions are never
+  mutated just because Ultra is the current default; their stored selection,
+  pause record, and run record are read as-is.
+- Plugin records are written with the ignorable `plugin:ultracode/*` envelope,
+  so a harness that does not know them keeps the record without an
+  unknown-event error. Old bare `autopilot/run`, `ultracode/mode`, and
+  `ultracode/pause` records are still read as a compatibility fallback.
+- Disposal is treated as a **hot reload**: the plugin drops only its in-memory
+  view. It never cancels a live run or rewrites the model selection from its
+  teardown path. A reloaded instance rehydrates runs, pause state, and Ultra
+  mode from the live session logs without promoting a running session to
+  paused.
+- A **true shutdown** is the process ending. The durable run record stays in
+  the log; the next time that session is opened, an unfinished run is restored
+  as `paused_resume`, and Play resumes it. Nothing resumes automatically.
+- **Uninstall:** if a session has Ultra selected, choose Max before disabling
+  the plugin. The plugin deliberately does not rewrite selections while it is
+  being disposed, because the same path runs on every hot reload. Without the
+  plugin, a log that still selects `ultra` has no Ultra effort decorator; pick
+  a standard effort to continue that session.
+
 ## Cache discipline
 
 Within a run the system prompt, tool declarations, provider, model, and wire
@@ -60,7 +84,7 @@ invariants with a mock adapter.
 ## Known limits
 
 - Disabling the plugin while a session has Ultra selected requires reselecting
-  an effort; the dispose path is best-effort.
+  an effort; the dispose path intentionally leaves the stored selection alone.
 - DSH's workflow tool has no resume/journaling, nested workflows, token budget,
   saved workflows, per-agent effort/isolation/agentType, or worktree isolation.
 - DSH has no Claude-style usage-limit pause; Ultra can spend more tokens.

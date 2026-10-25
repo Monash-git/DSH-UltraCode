@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Carry an Ultra default only into blank new sessions; existing sessions
+  without a selection are no longer mutated.
+- Treat plugin disposal as a hot reload: live runs and model selections survive,
+  and a reloaded instance rehydrates its view from the live session logs.
+- Keep reading legacy bare plugin records inside the ignorable envelope.
+- Cover blank/new carry, existing-session non-mutation, old-log load, and
+  unload/reload in the unit and runtime suites.
+
 ## 0.2.0
 
 - Added the selector-level Ultra tier for DeepSeek models (`ultra` persisted,

@@ -219,6 +219,13 @@ export function openTurn(agent: SessionCarrier): number {
   return open
 }
 
+/** Whether the session has opened or closed a turn, so it is no longer blank. */
+export function hasPriorTurn(agent: SessionCarrier): boolean {
+  return agent.session.snapshotEvents().some(
+    event => event.type === 'turn/start' || event.type === 'turn/end',
+  )
+}
+
 /** Whether a human-authored prompt appears after the given seq. */
 export function hasHumanMessageAfter(events: readonly SessionEvent[], seq: number): boolean {
   return events.some(event => event.seq > seq

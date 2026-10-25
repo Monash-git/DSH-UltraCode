@@ -27,6 +27,11 @@ function appendPlaybook(session: Session): void {
   }), { surfaceOp: 'append' })
 }
 
+function appendCompletedTurn(session: Session): void {
+  session.append('turn/start', { turn: 1 })
+  session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+}
+
 describe('UltraModeController', () => {
   it('injects the full playbook on selector activation and a reminder on the next human turn', () => {
     const { agent, session } = fakeAgent()
@@ -64,7 +69,7 @@ describe('UltraModeController', () => {
     expect(controller.commandModeOn(agent)).toBe(false)
   })
 
-  it('carries an Ultra default into a session with no selection event', () => {
+  it('carries an Ultra default into a blank new session', () => {
     const { agent, session } = fakeAgent()
     const controller = new UltraModeController(resolveConfig(), () => ({
       provider: 'deepseek-official',
@@ -76,6 +81,49 @@ describe('UltraModeController', () => {
     const additions = controller.onPreStep({ agent, messages: [], turn: 1, step: 1 })
     expect(additions).toHaveLength(1)
     expect(JSON.stringify(additions[0])).toContain(ULTRA_STANDING_MARKER)
+  })
+
+  it('loads an old session with its stored selection intact', () => {
+    const { agent, session } = fakeAgent()
+    ;(session as unknown as { append(type: string, data: unknown): unknown }).append('model/selection', {
+      provider: 'deepseek-official',
+      model: 'mock',
+      reasoningEffort: 'max',
+    })
+    appendCompletedTurn(session)
+    const before = session.snapshotEvents()
+    const controller = new UltraModeController(resolveConfig(), () => ({
+      provider: 'deepseek-official',
+      model: 'mock',
+      reasoningEffort: 'ultra',
+    }))
+
+    controller.onCreated(agent)
+    controller.onPreStep({ agent, messages: [], turn: 2, step: 1 })
+
+    expect(session.snapshotEvents()).toEqual(before)
+    expect(latestModelSelection(session.snapshotEvents())?.reasoningEffort).toBe('max')
+    expect(controller.isSelectorUltra(agent)).toBe(false)
+  })
+
+  it('leaves an existing session without a selection untouched by the Ultra default', () => {
+    const { agent, session } = fakeAgent()
+    appendCompletedTurn(session)
+    const before = session.snapshotEvents().length
+    const controller = new UltraModeController(resolveConfig(), () => ({
+      provider: 'deepseek-official',
+      model: 'mock',
+      reasoningEffort: 'ultra',
+    }))
+
+    controller.onCreated(agent)
+    const additions = controller.onPreStep({ agent, messages: [], turn: 2, step: 1 })
+
+    expect(latestModelSelection(session.snapshotEvents())).toBeUndefined()
+    expect(session.snapshotEvents()).toHaveLength(before)
+    expect(additions).toHaveLength(0)
+    expect(controller.isSelectorUltra(agent)).toBe(false)
+    expect(controller.selectedEffort(agent)).toBeUndefined()
   })
 
   it('honors the effort-independent command mode', () => {
