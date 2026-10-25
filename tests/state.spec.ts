@@ -17,6 +17,7 @@ import {
   latestModelSelection,
   latestPauseEvent,
   latestRunEvent,
+  liveOwnedJob,
   markRunWaiting,
   openTurn,
   resumeRunActive,
@@ -176,6 +177,21 @@ describe('run state', () => {
     expect(openTurn(agent)).toBe(4)
     agent.session.append('turn/end', { turn: 4, reason: { kind: 'completed' } })
     expect(openTurn(agent)).toBe(0)
+  })
+
+  it('recognizes only running jobs owned by the session', () => {
+    const owner = 'owner-session'
+    const registry = {
+      list: () => [
+        { id: 'foreign', owner: 'other-session', status: 'running' },
+        { id: 'stopping', owner, status: 'stopping' },
+        { id: 'unowned', status: 'running' },
+        { id: 'live', owner, status: 'running' },
+      ],
+    }
+
+    expect(liveOwnedJob(registry, owner)?.id).toBe('live')
+    expect(liveOwnedJob(undefined, owner)).toBeUndefined()
   })
 
   it('detects pending user work in either inbox list', () => {
