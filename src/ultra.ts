@@ -18,7 +18,7 @@ import {
 } from './prompts.js'
 import {
   appendModeEvent,
-  hasFullPlaybookSinceCompaction,
+  hasPromptSinceCompaction,
   hasReminderForTurn,
   isRootAgent,
   latestModeEvent,
@@ -141,7 +141,7 @@ export class UltraModeController {
 
     const additions: UserMessage[] = []
     const forceFullPlaybook = this.forceFullPlaybook.delete(key)
-    const hasPlaybook = !forceFullPlaybook && hasFullPlaybookSinceCompaction(agent, ULTRA_STANDING_MARKER)
+    const hasPlaybook = !forceFullPlaybook && hasPromptSinceCompaction(agent, ULTRA_STANDING_MARKER)
     if (!hasPlaybook) {
       additions.push(createUserMessage({
         content: [{ type: 'text', text: ULTRA_STANDING_PLAYBOOK }],

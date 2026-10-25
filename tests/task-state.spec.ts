@@ -23,8 +23,19 @@ function subagent(): { agent: Agent; session: Session } {
   return { agent: { session } as unknown as Agent, session }
 }
 
+function appendPrompt(session: Session, additions: ReturnType<TaskStateController['onPreStep']>): void {
+  session.append('user/message', additions[0]!, { surfaceOp: 'append' })
+}
+
+function compact(session: Session): void {
+  ;(session as unknown as { append(type: string, data: unknown): unknown }).append('compaction/end', {
+    compactionId: 'test-compaction',
+    turn: null,
+  })
+}
+
 describe('TaskStateController', () => {
-  it('appends the generic prompt once to a root session', () => {
+  it('appends the generic prompt once before the first compaction', () => {
     const { agent, session } = rootAgent()
     const controller = new TaskStateController()
 
@@ -33,7 +44,38 @@ describe('TaskStateController', () => {
     expect(JSON.stringify(first[0])).toContain(TASK_STATE_MARKER)
     expect(JSON.stringify(first[0])).toContain('Any multi-step task')
 
-    session.append('user/message', first[0]!, { surfaceOp: 'append' })
+    appendPrompt(session, first)
+    expect(controller.onPreStep(agent)).toHaveLength(0)
+  })
+
+  it('re-anchors the generic prompt after a compaction without duplicating it', () => {
+    const { agent, session } = rootAgent()
+    const controller = new TaskStateController()
+
+    appendPrompt(session, controller.onPreStep(agent))
+    expect(controller.onPreStep(agent)).toHaveLength(0)
+
+    compact(session)
+    const reanchored = controller.onPreStep(agent)
+    expect(reanchored).toHaveLength(1)
+    expect(JSON.stringify(reanchored[0])).toContain(TASK_STATE_MARKER)
+
+    appendPrompt(session, reanchored)
+    expect(controller.onPreStep(agent)).toHaveLength(0)
+  })
+
+  it('re-anchors once per compaction', () => {
+    const { agent, session } = rootAgent()
+    const controller = new TaskStateController()
+
+    appendPrompt(session, controller.onPreStep(agent))
+    compact(session)
+    appendPrompt(session, controller.onPreStep(agent))
+    compact(session)
+
+    const reanchored = controller.onPreStep(agent)
+    expect(reanchored).toHaveLength(1)
+    appendPrompt(session, reanchored)
     expect(controller.onPreStep(agent)).toHaveLength(0)
   })
 

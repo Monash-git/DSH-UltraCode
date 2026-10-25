@@ -340,6 +340,8 @@ async function scenarioTaskState() {
   const h = await createHarness([
     textResponse('Hello.'),
     textResponse('Still here.'),
+    textResponse('After compaction.'),
+    textResponse('Still after compaction.'),
   ])
   try {
     h.agent.followup(user('hello'))
@@ -361,9 +363,34 @@ async function scenarioTaskState() {
     assert.equal(
       occurrences(requestText(h.adapter.requests[1]), TASK_STATE_MARKER),
       1,
-      'the task-state prompt must be appended once per root session',
+      'the task-state prompt must not repeat before a compaction',
     )
     assertCacheStable(h.adapter.requests[0], h.adapter.requests[1], h.agent.session.snapshotEvents())
+
+    h.agent.session.append('compaction/end', { compactionId: 'task-state-test', turn: null })
+    h.agent.followup(user('after compaction'))
+    await withTimeout(h.agent.whenIdle(), 'task-state post-compaction turn')
+    const postCompaction = h.adapter.requests[2]
+    assert.equal(
+      occurrences(requestText(postCompaction), TASK_STATE_MARKER),
+      2,
+      'the task-state prompt must be re-anchored once after a compaction',
+    )
+    const promptIndex = postCompaction.messages.findLastIndex(message =>
+      JSON.stringify(message).includes(TASK_STATE_MARKER))
+    const turnInputIndex = postCompaction.messages.findLastIndex(message =>
+      JSON.stringify(message).includes('after compaction'))
+    assert.ok(promptIndex > turnInputIndex, 'the re-anchor must follow the post-compaction turn input')
+    assertCacheStable(h.adapter.requests[1], postCompaction, h.agent.session.snapshotEvents())
+
+    h.agent.followup(user('still here'))
+    await withTimeout(h.agent.whenIdle(), 'task-state post-re-anchor turn')
+    assert.equal(
+      occurrences(requestText(h.adapter.requests[3]), TASK_STATE_MARKER),
+      2,
+      'the task-state prompt must not duplicate after the re-anchor',
+    )
+    assertCacheStable(postCompaction, h.adapter.requests[3], h.agent.session.snapshotEvents())
     return { scenario: 'task-state', requests: h.adapter.requests.length, skillReads: h.skillReads.length }
   } finally {
     await h.handle.dispose()

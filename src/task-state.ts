@@ -8,18 +8,18 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { TASK_STATE_MARKER, TASK_STATE_PROMPT } from './prompts.js'
-import { isRootAgent, messageText } from './state.js'
+import { hasPromptSinceCompaction, isRootAgent } from './state.js'
 
 /** Appends the generic task-state prompt at the first root pre-step of a session. */
 export class TaskStateController {
-  /** Return the prompt once, or an empty list when the session already has it. */
+  /**
+   * Return the prompt once per context, or an empty list when the current
+   * context already has it. A compaction drops the model-visible copy, so the
+   * prompt is re-anchored once after each compaction.
+   */
   onPreStep(agent: Agent): UserMessage[] {
     if (!isRootAgent(agent)) return []
-    const alreadyPresent = agent.session.snapshotEvents().some(event =>
-      event.type === 'user/message'
-      && event.data.source.kind === 'ultracode'
-      && messageText(event.data).includes(TASK_STATE_MARKER))
-    if (alreadyPresent) return []
+    if (hasPromptSinceCompaction(agent, TASK_STATE_MARKER)) return []
     return [createUserMessage({
       content: [{ type: 'text', text: TASK_STATE_PROMPT }],
       source: { kind: 'ultracode' },
