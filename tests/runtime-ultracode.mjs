@@ -361,6 +361,23 @@ function checkpoints(agent) {
     .filter(Boolean)
 }
 
+function wakeHolds(agent) {
+  return agent.session.snapshotEvents()
+    .map(event => pluginData(event, 'plugin:ultracode/wake-hold'))
+    .filter(Boolean)
+}
+
+function wakeReleases(agent) {
+  return agent.session.snapshotEvents()
+    .map(event => pluginData(event, 'plugin:ultracode/wake-release'))
+    .filter(Boolean)
+}
+
+function openWakeHolds(agent) {
+  const released = new Set(wakeReleases(agent).map(record => record.holdId))
+  return wakeHolds(agent).filter(record => !released.has(record.holdId))
+}
+
 async function waitForCondition(predicate, label, timeout = 20_000) {
   const deadline = Date.now() + timeout
   while (Date.now() < deadline) {
@@ -1096,9 +1113,11 @@ async function scenarioLocalSubagentPause() {
         checkpoint.pauseId === manifest.pauseId && checkpoint.forced === false),
       'the child should record a durable checkpoint',
     )
+    const childMessages = child.session.snapshotEvents()
+      .filter(event => event.type === 'user/message')
     assert.ok(
-      !JSON.stringify(child.session.snapshotEvents()).includes('Ultra host pause'),
-      'the host pause control must not enter the child transcript',
+      !JSON.stringify(childMessages).includes('Ultra host pause'),
+      'the host pause control must not become a durable user message',
     )
 
     const resumed = await h.ctx.commands.execute(h.agent, '/resume', [], new AbortController().signal)
@@ -1122,6 +1141,173 @@ async function scenarioLocalSubagentPause() {
     }
   } finally {
     await childHandle?.dispose()
+    await h.handle.dispose()
+  }
+}
+
+async function scenarioPauseWakeGate() {
+  const h = await createHarness([
+    textResponse('The independent check is done; only the background job remains.'),
+    toolCallResponse(
+      'call-pause-wake-complete',
+      'complete_run',
+      { summary: 'held completion notice released' },
+      'Collecting the background job result.',
+    ),
+  ], { jobsService: true })
+  try {
+    const job = h.jobs.live(h.agent.session.id)
+    h.agent.followup(user('/tdd'))
+    await withTimeout(h.agent.whenIdle(), 'pause-wake first stop')
+    assert.ok(runPhases(h.agent).includes('waiting_job'), 'the run should yield on the live job')
+
+    const paused = await h.ctx.commands.execute(h.agent, '/pause', [], new AbortController().signal)
+    assert.ok(paused, 'the pause command should be registered')
+    await waitForCondition(
+      () => latestPauseManifest(h.agent)?.phase === 'paused',
+      'pause-wake manifest paused',
+    )
+    const requestsAtPause = h.adapter.requests.length
+    assert.equal(latestRun(h.agent)?.phase, 'paused_user')
+    assert.equal(pauseRecords(h.agent).at(-1)?.paused, true)
+
+    h.jobs.settle(job)
+    h.agent.followup(completionNotice(job.id))
+    await withTimeout(h.agent.whenIdle(), 'pause-wake held notice')
+
+    assert.equal(
+      h.adapter.requests.length,
+      requestsAtPause,
+      'a completion wake must not open a model turn while paused',
+    )
+    assert.equal(pauseRecords(h.agent).at(-1)?.paused, true, 'the wake must not clear the pause')
+    const held = wakeHolds(h.agent)
+    assert.equal(held.length, 1, 'the completion notice should be held durably')
+    assert.ok(JSON.stringify(held[0]).includes(job.id), 'the hold should preserve the notice')
+    assert.equal(latestRun(h.agent)?.phase, 'paused_user', 'a held wake is not a resume')
+
+    const resumed = await h.ctx.commands.execute(h.agent, '/resume', [], new AbortController().signal)
+    assert.ok(resumed, 'the resume command should be registered')
+    await withTimeout(h.agent.whenIdle(), 'pause-wake resume')
+
+    assert.equal(
+      h.adapter.requests.length,
+      requestsAtPause + 1,
+      'Play should release exactly one resumed turn',
+    )
+    const releasedRequest = h.adapter.requests.at(-1)
+    assert.ok(requestText(releasedRequest).includes(job.id), 'the held notice must reach the model on Play')
+    assert.ok(
+      JSON.stringify(releasedRequest.messages).includes('autopilot_continue'),
+      'the released wake should resume the autopilot run',
+    )
+    assert.equal(pauseRecords(h.agent).at(-1)?.paused, false, 'Play should clear the durable pause')
+    assert.equal(openWakeHolds(h.agent).length, 0, 'the released hold must not replay again')
+    assert.equal(wakeReleases(h.agent).length, 1, 'the release should be recorded durably')
+    assert.ok(runPhases(h.agent).includes('completed'), 'the resumed run should finish')
+    return { scenario: 'pause-wake-gate', requests: h.adapter.requests.length, held: held.length }
+  } finally {
+    await h.handle.dispose()
+  }
+}
+
+async function scenarioPauseWakeReload() {
+  const h = await createHarness([
+    textResponse('Only the background job remains.'),
+    toolCallResponse(
+      'call-pause-reload-complete',
+      'complete_run',
+      { summary: 'notice survived the reload' },
+      'Collecting the background job result.',
+    ),
+  ], { jobsService: true })
+  try {
+    const job = h.jobs.live(h.agent.session.id)
+    h.agent.followup(user('/tdd'))
+    await withTimeout(h.agent.whenIdle(), 'pause-reload first stop')
+    await h.ctx.commands.execute(h.agent, '/pause', [], new AbortController().signal)
+    await waitForCondition(
+      () => latestPauseManifest(h.agent)?.phase === 'paused',
+      'pause-reload manifest paused',
+    )
+    assert.equal(pauseRecords(h.agent).at(-1)?.paused, true)
+
+    // A hot reload is a fresh plugin view over the same live session.
+    await h.ultraFiber.dispose()
+    h.ultraFiber = await h.ctx.plugin(ultraPlugin, {})
+    await new Promise(resolve => setTimeout(resolve, 10))
+    assert.equal(pauseRecords(h.agent).at(-1)?.paused, true, 'reload must keep the durable pause')
+    const requestsBeforeWake = h.adapter.requests.length
+
+    h.jobs.settle(job)
+    h.agent.followup(completionNotice(job.id))
+    await withTimeout(h.agent.whenIdle(), 'pause-reload held notice')
+
+    assert.equal(
+      h.adapter.requests.length,
+      requestsBeforeWake,
+      'the reloaded plugin must still hold the wake without a model turn',
+    )
+    assert.equal(pauseRecords(h.agent).at(-1)?.paused, true)
+    assert.equal(openWakeHolds(h.agent).length, 1)
+
+    await h.ctx.commands.execute(h.agent, '/resume', [], new AbortController().signal)
+    await withTimeout(h.agent.whenIdle(), 'pause-reload resume')
+    assert.equal(h.adapter.requests.length, requestsBeforeWake + 1)
+    assert.ok(requestText(h.adapter.requests.at(-1)).includes(job.id))
+    assert.equal(pauseRecords(h.agent).at(-1)?.paused, false)
+    assert.equal(openWakeHolds(h.agent).length, 0)
+    return { scenario: 'pause-wake-reload', requests: h.adapter.requests.length }
+  } finally {
+    await h.handle.dispose()
+  }
+}
+
+async function scenarioPauseTextDirection() {
+  const h = await createHarness([
+    textResponse('Only the background job remains.'),
+    textResponse('Starting the new direction with the finished job in view.'),
+  ], { jobsService: true })
+  try {
+    const job = h.jobs.live(h.agent.session.id)
+    h.agent.followup(user('/tdd'))
+    await withTimeout(h.agent.whenIdle(), 'pause-text first stop')
+    await h.ctx.commands.execute(h.agent, '/pause', [], new AbortController().signal)
+    await waitForCondition(
+      () => latestPauseManifest(h.agent)?.phase === 'paused',
+      'pause-text manifest paused',
+    )
+
+    h.jobs.settle(job)
+    h.agent.followup(completionNotice(job.id))
+    await withTimeout(h.agent.whenIdle(), 'pause-text held notice')
+    assert.equal(openWakeHolds(h.agent).length, 1)
+    const requestsBeforeDirection = h.adapter.requests.length
+
+    h.agent.followup(user('change direction'))
+    await withTimeout(h.agent.whenIdle(), 'pause-text direction turn')
+
+    assert.equal(
+      h.adapter.requests.length,
+      requestsBeforeDirection + 1,
+      'text sent while paused should start exactly one new direction turn',
+    )
+    const direction = h.adapter.requests.at(-1)
+    assert.ok(requestText(direction).includes('change direction'))
+    assert.ok(
+      requestText(direction).includes(job.id),
+      'the held completion notice must join the new direction instead of being dropped',
+    )
+    assert.ok(
+      !JSON.stringify(direction.messages).includes('autopilot_continue'),
+      'a new direction must cancel the pause, not resume the run',
+    )
+    assert.equal(pauseRecords(h.agent).at(-1)?.paused, false)
+    assert.equal(latestRun(h.agent)?.phase, 'cancelled')
+    assert.equal(openWakeHolds(h.agent).length, 0)
+    assert.equal(wakeReleases(h.agent).at(-1)?.reason, 'user-direction')
+    return { scenario: 'pause-text-direction', requests: h.adapter.requests.length }
+  } finally {
     await h.handle.dispose()
   }
 }
@@ -1327,6 +1513,9 @@ for (const scenario of [
   scenarioPauseResume,
   scenarioAutopilotPause,
   scenarioLocalSubagentPause,
+  scenarioPauseWakeGate,
+  scenarioPauseWakeReload,
+  scenarioPauseTextDirection,
   scenarioQuestion,
   scenarioTurnYield,
   scenarioWaitingJobUserMessage,

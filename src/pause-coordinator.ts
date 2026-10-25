@@ -345,12 +345,14 @@ export class PauseCoordinator {
     }
 
     manifest.phase = mode === 'cancel' ? 'cancelled' : 'resumed'
-    const warning = manifest.children
-      .map(child => child.warning)
-      .filter((value): value is string => value !== undefined)
-      .join(' ')
-    if (warning === '') delete manifest.warning
-    else manifest.warning = warning
+    // Keep a warning recorded before this release (a restored process cannot
+    // resume jobs), and append what this release learned about its children.
+    const warning = [...new Set([
+      manifest.warning,
+      ...manifest.children.map(child => child.warning),
+    ].filter((value): value is string => value !== undefined && value !== ''))]
+    if (warning.length === 0) delete manifest.warning
+    else manifest.warning = warning.join(' ')
     await this.write(root, manifest)
     if (active !== undefined) this.active.delete(rootKey)
     return {
@@ -377,16 +379,29 @@ export class PauseCoordinator {
   }
 
   /**
-   * Release every park wait on plugin unload so no child turn hangs forever.
-   * A hot reload leaves agents live, so parked turns continue in place rather
-   * than ending as errors; the durable pause record and manifest still say
-   * paused, and the reloaded instance can Play-release or report them.
+   * Stop every park wait on plugin unload so no child turn hangs forever.
+   * A reload must not resume paused work: live parked children are cancelled
+   * through the normal interrupt path (preserving their inbox), and any
+   * not-yet-parked request is aborted. The durable pause record and manifest
+   * still say paused; the reloaded instance can Play-release (warm-resume)
+   * the children or report them.
    */
   dispose(): void {
     this.disposed = true
-    for (const active of this.active.values()) active.released = true
+    for (const active of this.active.values()) {
+      active.released = true
+      for (const record of active.manifest.children) {
+        const child = this.liveChild(active.root, record.id)
+        if (child === undefined) continue
+        try {
+          child.cancel({ kind: 'parent' }, { keepInbox: true })
+        } catch {
+          // A child already leaving cannot be stopped again.
+        }
+      }
+    }
     this.active.clear()
-    this.gate.dispose('resume')
+    this.gate.dispose('abort')
   }
 
   /** Live descendants by durable lineage (`origin: subagent`), direct or deeper. */

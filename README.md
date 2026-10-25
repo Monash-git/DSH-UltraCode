@@ -93,6 +93,19 @@ restores the paused state. Play resumes an autopilot run with a continuation
 nudge, or an ordinary interrupted turn with a generic resume prompt. No
 automatic resume and no silent spend.
 
+Completion wakes are gated while paused. A background job notice, a subagent
+settlement, or any other non-human input claimed at a root `agent/pre-step` is
+captured verbatim as a durable `plugin:ultracode/wake-hold` record and the step
+is rejected, so the turn closes without a model request and no work starts.
+Play replays every unreleased hold into the resume batch and records a durable
+release. Text sent while paused cancels the pause and joins any held wakes to
+the new direction instead of dropping them. Holds survive a hot reload and a
+process restart; a restored pause always shows Play and never resumes itself.
+When a pause is restored after a process restart, its manifest says that the
+recorded background jobs did not survive and must be restarted from the saved
+plan or checkpoint (stopping and restarting those jobs belongs to the
+workflow/bash pause ticket).
+
 Pause is root-mediated for local subagents. The root writes a durable pause
 manifest and sends each live descendant a host control message. At the child's
 next `agent/pre-step` the control is consumed before the model sees it, the
@@ -155,16 +168,31 @@ invariants with a mock adapter.
 - DSH's workflow tool has no resume/journaling, nested workflows, token budget,
   saved workflows, per-agent effort/isolation/agentType, or worktree isolation.
 - DSH has no Claude-style usage-limit pause; Ultra can spend more tokens.
-- Background workflow jobs are jobs, not autopilot; pausing the agent records
-  the job ids in the pause manifest but does not cancel or restart the jobs
-  (that is the workflow/bash pause ticket). Pausing while a run waits on a job
-  records the pause, but DSH still delivers the job's completion wake; there is
-  no wake gate yet.
+- Background workflow jobs are jobs, not autopilot; pausing records the job ids
+  in the pause manifest but does not cancel or restart the jobs (that is the
+  workflow/bash pause ticket). A completion wake while paused is held durably
+  and released only by Play. After a process restart the recorded jobs no
+  longer exist, and the pause reports that they must be restarted from the
+  saved plan or checkpoint.
 - The local-child park uses DSH's awaited `agent/pre-step` boundary to hold a
   turn open. It is plugin-only and deliberately not a core suspend gate: an
   in-flight tool still has to settle before the child can reach its park point,
   and a process restart cannot restore a parked in-memory turn (the session
-  checkpoint can be cold-resumed instead).
+  checkpoint can be cold-resumed instead). Unloading the plugin cancels a
+  parked child's turn through the normal interrupt path instead of releasing
+  it, so a reload never resumes paused work; Play warm-resumes the child from
+  its checkpoint.
+- The root wake gate also uses `agent/pre-step`: DSH opens the wake's turn
+  boundary and claims the notice, then the plugin records the notice durably
+  and rejects the step before any model request. If the process crashes between
+  the claim and the hold flush, that notice can be lost; the session still
+  reopens paused. A crash after Play delivers a held notice but before its
+  release record is flushed can replay the notice once more. Neither case
+  starts work without Play.
+- Pausing while a run is waiting on a background job keeps the run paused when
+  the job settles; Play releases the held notice and continues the run. The
+  plugin cannot stop an in-flight tool, so a wake that was already claimed
+  inside a running tool chain is delivered by that turn rather than held.
 - The plugin detects a live job through the optional `ctx.jobs` service. If the
   composition omits it, turn yield simply does not trigger.
 - `session_status` reports the calling root session only. It does not read

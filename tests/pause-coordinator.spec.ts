@@ -517,6 +517,23 @@ describe('root pause protocol for local subagents', () => {
     expect(idle.cancelCalls).toEqual([])
   })
 
+  it('does not resume parked work when the plugin unloads', async () => {
+    const world = createWorld()
+    const child = world.addChild('parked child')
+    child.status = 'running'
+
+    world.pause.pause(world.root)
+    await waitFor(() => latestManifest(world.root)?.phase === 'paused', 'paused before unload')
+    expect(child.batches).toEqual([])
+
+    world.coordinator.dispose()
+    await child.settled()
+
+    // The parked turn is stopped, not released back to the model.
+    expect(child.batches).toEqual([])
+    expect(child.cancelCalls).toContainEqual([{ kind: 'parent' }, { keepInbox: true }])
+  })
+
   it('cancels the pause and releases parked children when the user starts a new direction', async () => {
     const world = createWorld()
     const child = world.addChild('parked child')
@@ -524,8 +541,8 @@ describe('root pause protocol for local subagents', () => {
     world.pause.pause(world.root)
     await waitFor(() => latestManifest(world.root)?.phase === 'paused', 'paused before user direction')
 
-    const cleared = world.pause.onPreStep(world.root, [user('new direction')])
-    expect(cleared).toBe(true)
+    const cleared = await world.pause.onPreStep(world.root, [user('new direction')])
+    expect(cleared.kind).toBe('released')
     expect(world.pause.isPaused(world.root)).toBe(false)
     await waitFor(() => latestManifest(world.root)?.phase === 'cancelled', 'manifest cancelled by user text')
     await child.settled()

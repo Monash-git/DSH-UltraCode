@@ -2,6 +2,7 @@
 
 import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-projection'
+import type { WakeHoldEvent, WakeReleaseEvent } from './wake.js'
 
 export type AutopilotPhase =
   | 'armed'
@@ -189,6 +190,8 @@ declare module '@deepseek-ai/dsh-session' {
     'plugin:ultracode/pause': UltracodePauseEvent
     'plugin:ultracode/pause-manifest': PauseManifestEvent
     'plugin:ultracode/checkpoint': PauseCheckpointEvent
+    'plugin:ultracode/wake-hold': WakeHoldEvent
+    'plugin:ultracode/wake-release': WakeReleaseEvent
   }
 }
 

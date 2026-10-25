@@ -9,17 +9,20 @@
 import { randomUUID } from 'node:crypto'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ResolvedConfig } from './config.js'
 import type { PauseCoordinator } from './pause-coordinator.js'
 import { continuationNudge, genericResumeNudge } from './prompts.js'
 import {
   appendPauseEvent,
+  appendPauseManifest,
   appendRunEvent,
   hasHumanMessageAfter,
   isRootAgent,
   isUnfinishedPhase,
   lastSeq,
   latestPauseInfo,
+  latestPauseManifest,
   latestTurnEnd,
   markRunWaiting,
   openTurn,
@@ -28,12 +31,26 @@ import {
   todoSummary,
   type RunState,
 } from './state.js'
-import type { ClearReason, PauseReason, UltracodePauseEvent } from './types.js'
+import type {
+  ClearReason,
+  PauseManifestEvent,
+  PauseReason,
+  UltracodePauseEvent,
+} from './types.js'
+import { WakeGate, type PendingWakes, type WakeReleaseReason } from './wake.js'
 
 export interface PauseOutcome {
   readonly ok: boolean
   readonly text: string
 }
+
+/** What a root pre-step should do with the claimed batch while paused. */
+export type PausePreStepAction =
+  | { readonly kind: 'none' }
+  /** The batch was captured durably; reject the step so no model turn starts. */
+  | { readonly kind: 'held' }
+  /** The user started a new direction; these held wakes join that turn. */
+  | { readonly kind: 'released'; readonly messages: readonly UserMessage[] }
 
 const RESUMABLE_TURN_END = new Set(['aborted', 'interrupted', 'error', 'max-tokens'])
 
@@ -41,12 +58,18 @@ const RESUMABLE_TURN_END = new Set(['aborted', 'interrupted', 'error', 'max-toke
 export class PauseController {
   private readonly paused = new Map<string, { reason: PauseReason | ClearReason; turn: number; atSeq: number }>()
   private readonly explicitCancel = new Set<string>()
+  /** Job-restart warnings for pauses restored from a previous process. */
+  private readonly restoredWarnings = new Map<string, string>()
+  private readonly wake: WakeGate
 
   constructor(
     private readonly config: ResolvedConfig,
     private readonly runs: Map<string, RunState>,
     private readonly coordinator?: PauseCoordinator,
-  ) {}
+    wake?: WakeGate,
+  ) {
+    this.wake = wake ?? new WakeGate()
+  }
 
   /**
    * Load durable pause state for an agent that stays live across a plugin
@@ -55,7 +78,13 @@ export class PauseController {
    */
   hydrate(agent: Agent): void {
     if (!isRootAgent(agent)) return
+    const key = sessionKey(agent)
+    const events = agent.session.snapshotEvents()
     this.restorePaused(agent)
+    // A hot reload cancelled the previous instance's park waits; settle an
+    // interrupted transition so the primary control shows Play, not a stuck
+    // pausing state. Jobs may still be alive, so no restart warning here.
+    this.settleRestoredPause(agent, events, key, false)
   }
 
   /** Load durable state and promote a crash-interrupted turn to paused. */
@@ -64,11 +93,12 @@ export class PauseController {
     const key = sessionKey(agent)
     const events = agent.session.snapshotEvents()
     const { latestPause, pauseSeq } = this.restorePaused(agent)
+    this.settleRestoredPause(agent, events, key, true)
 
     const run = this.runs.get(key)
-    if (run !== undefined && run.phase === 'waiting_user') {
-      // A model question is an answer-pending state, not the play-button pause.
-      this.paused.delete(key)
+    if (run !== undefined && run.phase === 'waiting_user' && !this.paused.has(key)) {
+      // A model question is an answer-pending state, not the play-button
+      // pause. An explicit pause recorded after the question still wins.
       return
     }
     if (run !== undefined && isUnfinishedPhase(run.phase)) {
@@ -87,6 +117,40 @@ export class PauseController {
     if (hasHumanMessageAfter(events, end.seq)) return
     if (latestPause !== undefined && !latestPause.paused && pauseSeq > end.seq) return
     this.markPaused(agent, 'interrupted', end.turn)
+  }
+
+  /**
+   * Reconcile a pause loaded from a persisted log. A previous process cannot
+   * finish a `pausing`/`resuming` transition, so settle the manifest to
+   * `paused` (reopening must show Play). A process restart also lost every
+   * recorded job: persist that warning once and keep it for the Play result.
+   */
+  private settleRestoredPause(
+    agent: Agent,
+    events: readonly SessionEvent[],
+    key: string,
+    processRestart: boolean,
+  ): void {
+    if (!this.paused.has(key)) return
+    const manifest = latestPauseManifest(events)
+    if (manifest === undefined) return
+    const warning = processRestart ? jobRestartWarning(manifest) : undefined
+    if (warning !== undefined) this.restoredWarnings.set(key, warning)
+    const settled = manifest.phase === 'pausing' || manifest.phase === 'resuming'
+    if (!settled && (warning === undefined || manifest.warning?.includes(warning) === true)) return
+    const combined = warning === undefined
+      ? manifest.warning
+      : manifest.warning === undefined
+        ? warning
+        : manifest.warning.includes(warning)
+          ? manifest.warning
+          : `${manifest.warning} ${warning}`
+    appendPauseManifest(agent, {
+      ...manifest,
+      ...(settled ? { phase: 'paused' as const } : {}),
+      ...combined === undefined ? {} : { warning: combined },
+      updatedAt: Date.now(),
+    })
   }
 
   /** Fold the newest durable pause record into the in-memory view. */
@@ -109,21 +173,37 @@ export class PauseController {
     return { latestPause, pauseSeq: pauseInfo?.seq ?? -1 }
   }
 
-  /** Clear a paused state when the user starts a new direction. */
-  onPreStep(agent: Agent, messages: readonly UserMessage[]): boolean {
-    if (!isRootAgent(agent) || !this.paused.has(sessionKey(agent))) return false
-    if (!messages.some(message => message.source.kind === 'user')) return false
-    this.clear(agent, 'cleared')
-    void this.coordinator?.release(agent, 'cancel').catch((error: unknown) => {
-      console.error('[dsh-ultracode] cancelling the child pause failed:', error)
-    })
-    const run = this.runs.get(sessionKey(agent))
-    if (run !== undefined && (run.phase === 'paused_user' || run.phase === 'paused_resume')) {
-      run.phase = 'cancelled'
-      run.reason = 'user continued with a new message'
-      appendRunEvent(agent, run)
+  /**
+   * Apply the root pause gate to one claimed batch.
+   *
+   * A human message cancels the pause and starts a new direction; any wakes
+   * held earlier are released into that same turn so nothing is lost. A pure
+   * background wake (job notice, subagent settlement, schedule input) is
+   * captured durably and the step is rejected: the driver closes the turn
+   * without a model request, and Play replays the batch later.
+   */
+  async onPreStep(agent: Agent, messages: readonly UserMessage[]): Promise<PausePreStepAction> {
+    const key = sessionKey(agent)
+    if (!isRootAgent(agent) || !this.paused.has(key)) return { kind: 'none' }
+    if (messages.some(message => message.source.kind === 'user')) {
+      this.clear(agent, 'cleared')
+      void this.coordinator?.release(agent, 'cancel').catch((error: unknown) => {
+        console.error('[dsh-ultracode] cancelling the child pause failed:', error)
+      })
+      const run = this.runs.get(key)
+      if (run !== undefined && (run.phase === 'paused_user' || run.phase === 'paused_resume')) {
+        run.phase = 'cancelled'
+        run.reason = 'user continued with a new message'
+        appendRunEvent(agent, run)
+      }
+      const pending = this.wake.pending(agent)
+      this.wake.markReleased(agent, pending.holds, 'user-direction')
+      await this.wake.flush(agent)
+      return { kind: 'released', messages: pending.messages }
     }
-    return true
+    if (messages.length === 0) return { kind: 'none' }
+    await this.wake.hold(agent, latestPauseManifest(agent.session.snapshotEvents())?.pauseId, messages)
+    return { kind: 'held' }
   }
 
   /** Pause immediately; cancel the active turn when there is one. */
@@ -143,6 +223,10 @@ export class PauseController {
       run.reason = 'paused by user'
       appendRunEvent(agent, run)
     }
+    // Make the durable pause record independent of the coordinator's slower
+    // manifest write: a crash right after the user clicks Pause must still
+    // reopen as paused.
+    void this.wake.flush(agent)
     if (agent.status === 'running') {
       agent.cancel({ kind: 'user' }, { keepInbox: true })
     }
@@ -169,17 +253,25 @@ export class PauseController {
    */
   async resumeAsync(agent: Agent): Promise<PauseOutcome> {
     if (!isRootAgent(agent)) return { ok: false, text: 'Resume is only available to the root session.' }
-    let warnings: string[] = []
+    const key = sessionKey(agent)
+    const warnings: string[] = []
     if (this.coordinator !== undefined) {
       try {
         const released = await this.coordinator.release(agent, 'resume')
-        warnings = [...released.warnings]
+        warnings.push(...released.warnings)
       } catch (error: unknown) {
-        warnings = [`Child release failed: ${error instanceof Error ? error.message : String(error)}`]
+        warnings.push(`Child release failed: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
+    const restoredWarning = this.restoredWarnings.get(key)
+    if (restoredWarning !== undefined) warnings.push(restoredWarning)
     const outcome = this.resumeLocal(agent, true)
-    if (!outcome.ok || warnings.length === 0) return outcome
+    // The release records are only as good as the next flush; Play is the one
+    // place where waiting for durability does not delay a live turn.
+    await this.wake.flush(agent)
+    if (!outcome.ok) return outcome
+    this.restoredWarnings.delete(key)
+    if (warnings.length === 0) return outcome
     return { ok: true, text: `${outcome.text} ${warnings.join(' ')}` }
   }
 
@@ -197,6 +289,12 @@ export class PauseController {
       }
       const previous = { phase: run.phase, round: run.round, reason: run.reason }
       const nextRound = run.round + 1
+      let staged: ReturnType<PauseController['stageHeld']>
+      try {
+        staged = this.stageHeld(agent)
+      } catch (error: unknown) {
+        return { ok: false, text: `Unable to resume the run: ${error instanceof Error ? error.message : String(error)}` }
+      }
       try {
         agent.steer(createUserMessage({
           content: [{
@@ -206,11 +304,13 @@ export class PauseController {
           source: { kind: 'autopilot' },
         }))
       } catch (error: unknown) {
+        this.unstageHeld(agent, staged)
         run.phase = previous.phase
         run.round = previous.round
         run.reason = previous.reason
         return { ok: false, text: `Unable to resume the run: ${error instanceof Error ? error.message : String(error)}` }
       }
+      this.finishHeld(agent, staged, 'play')
       if (!releasedChildren) this.releaseChildren(agent)
       resumeRunActive(run)
       run.round = nextRound
@@ -223,18 +323,65 @@ export class PauseController {
     if (!this.paused.has(key)) {
       return { ok: false, text: 'No paused session to resume.' }
     }
+    let staged: ReturnType<PauseController['stageHeld']>
+    try {
+      staged = this.stageHeld(agent)
+    } catch (error: unknown) {
+      return { ok: false, text: `Unable to resume the session: ${error instanceof Error ? error.message : String(error)}` }
+    }
     try {
       agent.steer(createUserMessage({
         content: [{ type: 'text', text: genericResumeNudge(todoSummary(agent)) }],
         source: { kind: 'ultracode' },
       }))
     } catch (error: unknown) {
+      this.unstageHeld(agent, staged)
       return { ok: false, text: `Unable to resume the session: ${error instanceof Error ? error.message : String(error)}` }
     }
+    this.finishHeld(agent, staged, 'play')
     if (!releasedChildren) this.releaseChildren(agent)
     if (run !== undefined) resumeRunActive(run)
     this.clear(agent, 'resumed')
     return { ok: true, text: 'Session resumed.' }
+  }
+
+  /**
+   * Put every held wake into the resume batch before the waking steer, so one
+   * model call sees the notices and the resume instruction together.
+   */
+  private stageHeld(agent: Agent): { readonly pending: PendingWakes; readonly appended: UserMessage['id'][] } {
+    const pending = this.wake.pending(agent)
+    const appended: UserMessage['id'][] = []
+    if (pending.messages.length > 0) {
+      try {
+        for (const message of pending.messages) {
+          agent.inbox.append('next-step', message)
+          appended.push(message.id)
+        }
+      } catch (error: unknown) {
+        this.unstageHeld(agent, { appended })
+        throw error
+      }
+    }
+    return { pending, appended }
+  }
+
+  /** Withdraw staged wakes after a failed resume, leaving them held for Play. */
+  private unstageHeld(
+    agent: Agent,
+    staged: { readonly appended: readonly UserMessage['id'][] },
+  ): void {
+    for (const id of staged.appended) agent.inbox.remove(id)
+  }
+
+  /** Mark staged wakes released only after the resume steer succeeded. */
+  private finishHeld(
+    agent: Agent,
+    staged: { readonly pending: PendingWakes },
+    reason: WakeReleaseReason,
+  ): void {
+    this.wake.markReleased(agent, staged.pending.holds, reason)
+    void this.wake.flush(agent)
   }
 
   /** Mark an explicit off/unload so turn-stopping does not record a pause. */
@@ -306,6 +453,7 @@ export class PauseController {
     const key = sessionKey(agent)
     this.paused.delete(key)
     this.explicitCancel.delete(key)
+    this.restoredWarnings.delete(key)
     this.coordinator?.abortChild(key)
     this.coordinator?.disposeRoot(key)
   }
@@ -349,4 +497,18 @@ export class PauseController {
       updatedAt: Date.now(),
     })
   }
+}
+
+/**
+ * Jobs live only in the process registry. A pause restored from a persisted
+ * log therefore cannot resume its recorded jobs; say so rather than letting
+ * the user believe Play brought them back.
+ */
+function jobRestartWarning(manifest: PauseManifestEvent | undefined): string | undefined {
+  if (manifest === undefined) return undefined
+  const lost = manifest.jobs.filter(job => job.status === 'running' || job.status === 'stopping')
+  if (lost.length === 0) return undefined
+  const subject = lost.length === 1 ? '1 background job' : `${lost.length} background jobs`
+  const object = lost.length === 1 ? 'it' : 'them'
+  return `${subject} did not survive the process restart; restart ${object} from the saved plan or checkpoint.`
 }

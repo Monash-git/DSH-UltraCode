@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Made pause durable across reload and process restart with a completion-wake
+  gate. A background job notice, subagent settlement, or other non-human wake
+  claimed while paused is stored verbatim as a `plugin:ultracode/wake-hold`
+  record and the step is rejected, so no model request is made; Play replays
+  every unreleased hold and records a durable release. Text sent while paused
+  cancels the pause and releases held wakes into the new direction. A pause
+  restored after a restart reports that its background jobs did not survive
+  and must be restarted from the saved plan or checkpoint.
 - Added root-mediated pause for local subagents. Pause now writes a durable
   manifest and sends each live descendant a host pre-step park control; the
   child flushes its session, records a checkpoint, acknowledges, and keeps its

@@ -152,17 +152,17 @@ describe('PauseController', () => {
     expect(latestRunEvent(agent.session.snapshotEvents())?.phase).toBe('waiting_user')
   })
 
-  it('clears a pause when the user starts a new direction', () => {
+  it('clears a pause when the user starts a new direction', async () => {
     const { agent, pause, runs } = setup()
     const run = createRunState('tdd', resolveConfig())
     run.phase = 'paused_user'
     runs.set(sessionKey(agent), run)
     pause.pause(agent)
-    const cleared = pause.onPreStep(agent, [createUserMessage({
+    const cleared = await pause.onPreStep(agent, [createUserMessage({
       content: [{ type: 'text', text: 'new direction' }],
       source: { kind: 'user' },
     })])
-    expect(cleared).toBe(true)
+    expect(cleared.kind).toBe('released')
     expect(pause.isPaused(agent)).toBe(false)
     expect(latestRunEvent(agent.session.snapshotEvents())?.phase).toBe('cancelled')
   })

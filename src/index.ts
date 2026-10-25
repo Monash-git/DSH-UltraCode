@@ -63,6 +63,7 @@ import {
   type RunState,
 } from './state.js'
 import { UltraModeController } from './ultra.js'
+import { WakeGate } from './wake.js'
 
 export const name = 'dsh-ultracode'
 export const inject = ['tools', 'commands', 'workingDirectory']
@@ -74,6 +75,8 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
   const hydrated = new Set<string>()
   const jobs = (): JobRegistryLike | undefined =>
     (ctx as unknown as { get(name: string): unknown }).get('jobs') as JobRegistryLike | undefined
+  const sessions = (): SessionStoreLike | undefined =>
+    (ctx as unknown as { get(name: string): unknown }).get('sessions') as SessionStoreLike | undefined
   const coordinator = new PauseCoordinator({
     timeoutMs: settings.pauseTimeoutMs,
     agents: () => (ctx as unknown as { get(name: string): unknown }).get('agents') as
@@ -82,12 +85,22 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
     subagents: () => (ctx as unknown as { get(name: string): unknown }).get('subagents') as
       | SubagentServiceLike
       | undefined,
-    sessions: () => (ctx as unknown as { get(name: string): unknown }).get('sessions') as
-      | SessionStoreLike
-      | undefined,
+    sessions,
     jobs,
   })
-  const pause = new PauseController(settings, runs, coordinator)
+  // A background wake claimed while paused is captured durably before the
+  // step is rejected, so Play can replay it and a crash cannot drop it.
+  const wake = new WakeGate({
+    flush: async agent => {
+      try {
+        await sessions()?.flush(agent.session)
+      } catch {
+        // The records are already in the live log; a failed barrier must not
+        // let the held wake reach the model.
+      }
+    },
+  })
+  const pause = new PauseController(settings, runs, coordinator, wake)
   const defaultSelection = (): { provider: string; model: string; reasoningEffort?: string } | undefined => {
     const service = (ctx as unknown as {
       get(name: string): unknown
@@ -235,9 +248,15 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
 
     try {
       const { agent, messages, turn, step } = payload
-      pause.onPreStep(agent, messages)
+      const pauseAction = await pause.onPreStep(agent, messages)
+      if (pauseAction.kind === 'held') {
+        // The wake is durable now. Rejecting closes the turn without a model
+        // request; Play replays the captured batch.
+        return { kind: 'reject' }
+      }
 
       const additions: UserMessage[] = []
+      if (pauseAction.kind === 'released') additions.push(...pauseAction.messages)
       additions.push(...ultra.onPreStep({ agent, messages, turn, step }))
       additions.push(...taskState.onPreStep(agent))
       additions.push(...observation.onPreStep(agent))
