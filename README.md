@@ -57,6 +57,28 @@ delivery and an unspent `maxConsecutiveWakes` budget. A settlement that lands
 in the driver's retirement window can still strand its notice until the next
 user input; that race belongs to DSH's agent loop.
 
+## Status and safe observation
+
+- Every root session gets `session_status`, a generic read-only tool. It reports
+  the current turn and step, the autopilot run state and round, the todo summary
+  with its last-updated time, the active background jobs owned by that session,
+  and the pause state. It folds in-memory session events and the optional job
+  registry; it never opens a session archive, a profile directory, or another
+  session's log. It is available to root sessions only.
+- A one-time generic observation prompt points the model at `session_status`
+  and the session-history tools. It states that one frame of a multi-frame
+  `.zstd` archive is a partial prefix and is not evidence, that a recognized
+  multi-frame format problem must end that line of investigation, and that
+  profile directories and `node_modules` must not be enumerated during
+  diagnosis. Like the task-state prompt, it is re-anchored once after a
+  compaction and contains no ticket, phase, or skill vocabulary.
+- The plugin bundle patch also mounts the five shipped model-facing session
+  query tools (`session_search`, `session_event_search`, `session_trace`,
+  `session_event_trace`, `session_event_read`) in an isolated
+  `sessionQuery` group with a lazy `:memory:` index. This is a profile
+  composition change only: no DSH server or `app.asar` change is needed. The
+  shared base index and the sidebar search keep their own configuration.
+
 ## Pause/play
 
 The composer activity seat shows a pause button while a root session is
@@ -112,6 +134,14 @@ invariants with a mock adapter.
   but DSH still delivers the job's completion wake; there is no wake gate yet.
 - The plugin detects a live job through the optional `ctx.jobs` service. If the
   composition omits it, turn yield simply does not trigger.
+- `session_status` reports the calling root session only. It does not read
+  another workspace's session; use the workspace-authorized session-history
+  tools for cross-session evidence.
+- The session-history tools ship with the DSH installation. The plugin's bundle
+  patch mounts them; if a DSH build does not carry
+  `@deepseek-ai/dsh-tool-session-query`, the profile layer fails to load that
+  row rather than changing core code. Do not also enable the official
+  **Session search** bundle: it registers the same five tool names.
 - The client bundle is built as a DSH client module. If a packaged Desktop
   build rejects third-party client bundles, the Host pause/resume commands
   remain available; do not patch `app.asar`.

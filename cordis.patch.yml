@@ -1,3 +1,28 @@
+# dsh-ultracode is a profile bundle. Its rows apply after dsh-base and
+# dsh-web-app, so this layer can both mount the plugin and complete the
+# desktop composition with tooling that ships in the DSH installation.
+
 - insert:
     - id: dsh-ultracode
       name: dsh-ultracode
+
+    # Model-facing, workspace-authorized session history tools. dsh-base mounts
+    # the sessionQuery service with full-text search off; this group mirrors the
+    # shipped optional session-search bundle: an isolated lazy in-memory index,
+    # so the shared service and the sidebar search keep their configuration.
+    # It provides session_search, session_event_search, session_trace,
+    # session_event_trace, and session_event_read as the supported alternative
+    # to decompressing raw session archives.
+    - id: ultracode-session-query
+      name: cordis:group
+      group: true
+      isolate:
+        sessionQuery: true
+      config:
+        - id: ultracode-session-query-sqlite
+          name: '@deepseek-ai/dsh-session-query-sqlite'
+          config:
+            path: ':memory:'
+            openAt: first-search
+        - id: ultracode-tool-session-query
+          name: '@deepseek-ai/dsh-tool-session-query'

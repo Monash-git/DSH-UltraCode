@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Added the generic read-only `session_status` root-session tool (turn, step,
+  run state, todo summary and last-updated time, active owned jobs, pause).
+- Added a one-time safe-observation prompt: use status/history tools, treat a
+  one-frame `.zstd` read as partial evidence, stop on a multi-frame format
+  problem, and do not enumerate profiles or `node_modules`.
+- The bundle patch now mounts the shipped session-history tools in an isolated
+  lazy session-query group, with no DSH core or `app.asar` change.
 - Carry an Ultra default only into blank new sessions; existing sessions
   without a selection are no longer mutated.
 - Treat plugin disposal as a hot reload: live runs and model selections survive,

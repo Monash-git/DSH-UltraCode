@@ -301,10 +301,23 @@ export function inboxHasUserWork(agent: InboxCarrier): boolean {
   return agent.inbox.nextTurn.some(isHuman) || agent.inbox.nextStep.some(isHuman)
 }
 
+/** The newest whole todo list and the durable time it was written. */
+export interface TodoSnapshot {
+  readonly todos: TodoItem[]
+  readonly updatedAt: number
+}
+
+/** Read the newest todo write from a session snapshot, including when it happened. */
+export function todoSnapshot(events: readonly SessionEvent[]): TodoSnapshot | undefined {
+  const event = lastEvent(events, candidate => todoItemsOf(candidate) !== undefined)
+  if (event === undefined) return undefined
+  const todos = todoItemsOf(event)
+  return todos === undefined ? undefined : { todos, updatedAt: event.time }
+}
+
 /** Read the newest whole todo list, or undefined when the todo tool never wrote one. */
 export function latestTodos(agent: SessionCarrier): TodoItem[] | undefined {
-  const event = lastEvent(agent.session.snapshotEvents(), candidate => todoItemsOf(candidate) !== undefined)
-  return event === undefined ? undefined : todoItemsOf(event)
+  return todoSnapshot(agent.session.snapshotEvents())?.todos
 }
 
 /** Compact todo summary for a continuation nudge. */

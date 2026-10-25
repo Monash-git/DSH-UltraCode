@@ -233,6 +233,7 @@ const tempDir = await mkdtemp(join(tmpdir(), 'dsh-ultracode-v2-'))
 async function createHarness(script, options = {}) {
   const adapter = new MockAdapter(script)
   const ctx = new Context()
+  if (options.jobs !== undefined) ctx.provide('jobs', options.jobs)
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(Session)
   await ctx.plugin(SessionProjectionRegistry)
@@ -242,6 +243,12 @@ async function createHarness(script, options = {}) {
   await ctx.plugin(WorkingDirectoryService, { defaultDirectory: tempDir })
   await ctx.plugin(CommandRuntime)
   await ctx.plugin(SkillRegistry)
+  if (options.sessionQuery === true) {
+    const { default: SessionQuerySqlite } = await import(pkg('dsh-session-query-sqlite/lib/index.js'))
+    await ctx.plugin(SessionQuerySqlite, { path: ':memory:', openAt: 'first-search' })
+    const toolSessionQuery = await import(pkg('dsh-tool-session-query/lib/index.js'))
+    await ctx.plugin(toolSessionQuery, {})
+  }
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(AgentLoop, { agents: [] })
   let jobs
@@ -276,6 +283,7 @@ async function createHarness(script, options = {}) {
   ctx.llm.registerAdapter(['deepseek-official'], adapter)
   const handle = await ctx.agents.create({
     sessionId: SessionId(`ultracode-v2-${sessionSeq += 1}`),
+    meta: { cwd: tempDir },
     agentOptions: { provider: 'deepseek-official', model: 'mock' },
     setup: async agentCtx => {
       await agentCtx.plugin(toolSkill)
@@ -346,7 +354,9 @@ function latestRun(agent) {
 
 const TASK_STATE_MARKER = '[ultracode:task-state]'
 const TASK_STATE_SENTENCE = 'Any multi-step task: keep the todo list current.'
+const OBSERVATION_MARKER = '[ultracode:observation]'
 const REPLY_FIRST = 'Reply first: a direct user question'
+const FORBIDDEN_GENERIC_VOCABULARY = /ticket|phase|skill|wayfinder|tdd/i
 
 function requestText(request) {
   return JSON.stringify(request.messages)
@@ -1059,11 +1069,156 @@ async function scenarioIndependentInstall() {
   }
 }
 
+async function scenarioStatusObservation() {
+  const jobs = {
+    list(caller) {
+      return [{
+        id: 'workflow-test-1',
+        kind: 'workflow',
+        label: 'verify build',
+        owner: caller,
+        status: 'running',
+        progress: '2/3',
+        startedAt: 1,
+      }]
+    },
+  }
+  const h = await createHarness([
+    toolCallResponse('call-status-wait', 'wait_tool', {}, 'Checking the current work before continuing.'),
+    toolCallResponse('call-status-read', 'session_status', {}, 'Answering the progress question from session status.'),
+    toolCallResponse(
+      'call-status-blocked',
+      'complete_run',
+      { summary: 'progress answered from status', blocked: 'diagnostic demo complete' },
+      'Progress: two of three checks are done; one background job is running; the session is not paused.',
+    ),
+  ], { waitTool: true, jobs })
+  try {
+    h.agent.followup(user('/tdd'))
+    await withTimeout(h.wait.started, 'status scenario wait start')
+
+    const first = h.adapter.requests[0]
+    const firstText = requestText(first)
+    const observation = first.messages.find(message =>
+      JSON.stringify(message).includes(OBSERVATION_MARKER))
+    assert.ok(observation, 'the first root request should carry the safe-observation prompt')
+    assert.ok(JSON.stringify(observation).includes('session_status'))
+    assert.ok(JSON.stringify(observation).includes('session_search'))
+    assert.ok(JSON.stringify(observation).includes('session_event_read'))
+    assert.ok(JSON.stringify(observation).includes('.zstd'))
+    assert.ok(JSON.stringify(observation).includes('partial'))
+    assert.doesNotMatch(
+      JSON.stringify(observation),
+      FORBIDDEN_GENERIC_VOCABULARY,
+      'the observation prompt must contain no ticket, phase, or skill vocabulary',
+    )
+    assert.ok(
+      first.tools.some(tool => tool.name === 'session_status'),
+      'the first request should advertise the session_status tool',
+    )
+
+    ;(h.agent.session).append('todo/write', {
+      todos: [
+        { content: 'Inspect the request path', status: 'completed' },
+        { content: 'Add the regression test', status: 'in_progress' },
+      ],
+    })
+    h.agent.steer(user('进度如何了？'))
+    h.wait.release()
+    await withTimeout(h.agent.whenIdle(), 'status scenario settle')
+
+    assert.equal(h.adapter.requests.length, 3, 'the progress answer should take one status step')
+    assert.ok(
+      requestText(h.adapter.requests[1]).includes('进度如何了？'),
+      'the progress question must reach the next model call',
+    )
+    const third = requestText(h.adapter.requests[2])
+    assert.ok(third.includes('session status: '), 'the status report should reach the model')
+    assert.match(third, /turn: \d+/)
+    assert.match(third, /step: \d+/)
+    assert.ok(third.includes('run: running'), 'the report should carry the current run state')
+    assert.ok(third.includes('todos: 1 completed, 1 open'), 'the report should carry the todo summary')
+    assert.ok(third.includes('updated '), 'the report should carry the todo last-updated time')
+    assert.ok(third.includes('jobs: 1 active'), 'the report should carry active owned jobs')
+    assert.ok(third.includes('workflow-test-1'), 'the report should name the owned job')
+    assert.ok(third.includes('pause: not paused'), 'the report should carry the pause state')
+
+    const calls = h.agent.session.snapshotEvents()
+      .filter(event => event.type === 'tool/call')
+      .map(event => event.data.name)
+    assert.deepEqual(calls, ['wait_tool', 'session_status', 'complete_run'])
+    const argumentsText = JSON.stringify(h.agent.session.snapshotEvents()
+      .filter(event => event.type === 'tool/call')
+      .map(event => event.data.arguments))
+    assert.ok(!argumentsText.includes('node_modules'), 'no diagnostic may list node_modules')
+    assert.ok(!argumentsText.includes('profiles'), 'no diagnostic may list profile directories')
+    assert.ok(
+      !firstText.includes('zstdDecompress'),
+      'the observation contract must not introduce ad-hoc archive decompression',
+    )
+    assertCacheStable(h.adapter.requests[0], h.adapter.requests[1], h.agent.session.snapshotEvents())
+    const phases = runPhases(h.agent)
+    assert.ok(phases.includes('exhausted'), `the blocked demo run should settle; phases: ${phases.join(', ')}`)
+    return { scenario: 'status-observation', requests: h.adapter.requests.length, phases }
+  } finally {
+    await h.handle.dispose()
+  }
+}
+
+async function scenarioSessionQueryComposition() {
+  const h = await createHarness([
+    textResponse('Session-query composition is ready.'),
+  ], { sessionQuery: true })
+  try {
+    const names = h.ctx.tools.schemas().map(tool => tool.name)
+    for (const expected of [
+      'session_search',
+      'session_event_search',
+      'session_trace',
+      'session_event_trace',
+      'session_event_read',
+    ]) {
+      assert.ok(names.includes(expected), `the composed profile should advertise ${expected}`)
+    }
+
+    h.agent.followup(user('compose the session history tools'))
+    await withTimeout(h.agent.whenIdle(), 'session-query composition turn')
+    const target = h.agent.session.snapshotEvents().find(event =>
+      event.type === 'user/message'
+      && JSON.stringify(event.data).includes('compose the session history tools'))
+    assert.ok(target, 'the composed run should record the prompt event')
+    const result = await h.ctx.tools.execute({
+      name: 'session_event_read',
+      arguments: { session_id: String(h.agent.session.id), seq: target.seq },
+      callId: ToolCallId('session-query-composition-1'),
+      signal: new AbortController().signal,
+      agent: h.agent,
+    })
+    assert.equal(
+      result.isError,
+      false,
+      `session_event_read should read authorized history; got ${JSON.stringify(result)}`,
+    )
+    const rendered = result.content
+      .map(block => block.type === 'text' ? block.text : '')
+      .join('\n')
+    assert.ok(
+      rendered.includes('compose the session history tools'),
+      `session_event_read should return the live session event; got: ${rendered}`,
+    )
+    return { scenario: 'session-query-composition', tools: names.length, eventRead: true }
+  } finally {
+    await h.handle.dispose()
+  }
+}
+
 const results = []
 for (const scenario of [
   scenarioTdd,
   scenarioTaskState,
   scenarioReplyFirst,
+  scenarioStatusObservation,
+  scenarioSessionQueryComposition,
   scenarioUltra,
   scenarioBlankCarry,
   scenarioUltraWorkflow,

@@ -23,6 +23,7 @@ import { evaluateCompletion } from './completion.js'
 import { resolveConfig, type PluginConfig } from './config.js'
 import { findSkillInvocation, hasUserMessage } from './detect.js'
 import { registerUltraEffort } from './effort.js'
+import { ObservationController } from './observation.js'
 import { PauseController } from './pause.js'
 import { registerUltracodeProjection } from './projection.js'
 import {
@@ -32,6 +33,7 @@ import {
   wrapUpNudge,
 } from './prompts.js'
 import { installBusyEnterDefault } from './steering.js'
+import { createSessionStatusTool, type StatusJobView } from './status.js'
 import { TaskStateController } from './task-state.js'
 import {
   activeElapsedMs,
@@ -77,6 +79,7 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
   const taskState = new TaskStateController()
   const jobs = (): JobRegistryLike | undefined =>
     (ctx as unknown as { get(name: string): unknown }).get('jobs') as JobRegistryLike | undefined
+  const observation = new ObservationController()
   const selectMax = (agent: Agent): void => {
     const selection = latestModelSelection(agent.session.snapshotEvents())
     if (selection?.reasoningEffort !== 'ultra') return
@@ -209,6 +212,7 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
       const additions: UserMessage[] = []
       additions.push(...ultra.onPreStep({ agent, messages, turn, step }))
       additions.push(...taskState.onPreStep(agent))
+      additions.push(...observation.onPreStep(agent))
 
       const key = sessionKey(agent)
       const current = runs.get(key)
@@ -406,6 +410,16 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
     },
   })
   ctx.tools.register(completeRun)
+  ctx.tools.register(createSessionStatusTool({
+    runs,
+    pause,
+    readJobs: (agent) => {
+      const jobs = ctx.get('jobs') as {
+        list(caller: typeof agent.session.id): readonly StatusJobView[]
+      } | undefined
+      return jobs?.list(agent.session.id) ?? []
+    },
+  }))
 
   ctx.commands.register({
     name: 'autopilot',
