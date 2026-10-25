@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Replaced the activity-seat pause/play button with the primary composer
+  action: with an empty draft, the main Send/Stop button becomes Pause while a
+  root session runs or waits on a background job, and Play while paused. Text
+  keeps the shipped Send/Steer action, and sending while paused clears the
+  pause. The occupant uses DSH's `conversation.input.primary` slot and the
+  existing `/pause` and `/resume` Host commands; it renders the default action
+  unchanged for subagents, locked sessions, and states it does not own.
 - Added autopilot turn yield: a run whose only remaining dependency is an
   owned running background job enters `waiting_job`, ends the turn without a
   continuation nudge, and resumes on the job's completion notice. Duration

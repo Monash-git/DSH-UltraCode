@@ -1,109 +1,45 @@
 /**
- * Composer activity control: pause a running root session and resume a paused
- * one without typing. This is a client plugin over the Host `/pause` and
- * `/resume` commands; it never replaces the Send/Stop button.
+ * Primary composer action: turn the main Send/Stop button into Pause/Play for
+ * a running, waiting, or paused root session with an empty draft.
+ *
+ * DSH's optional `conversation.input.primary` single slot shares the shipped
+ * default action and the composer state. This occupant renders that default
+ * action unchanged everywhere it does not own the state, so Send/Stop/Steer,
+ * uploads, and focus behavior stay exactly as shipped. Pause and Play are the
+ * existing Host `/pause` and `/resume` commands; there is no second pause
+ * button in the activity seat.
  */
 
-import { useEffect, useState, useSyncExternalStore } from 'react'
-import en from '../../locale/en.json' with { type: 'json' }
-import zh from '../../locale/zh.json' with { type: 'json' }
-import { controlView, EMPTY, waitingOnJob, type Snapshot, type UltraView } from './view.js'
+import { useState, type CSSProperties, type MouseEvent, type ReactNode } from 'react'
+import { applyClient, type PrimarySlotContext } from './adapter.js'
+import {
+  primaryButtonProps,
+  primaryCommand,
+  primaryText,
+  primaryView,
+  type PrimaryOwnerState,
+  type PrimaryText,
+  type UltraView,
+} from './view.js'
 
-interface ProjectionStore<T> {
-  getSnapshot(): T
-  subscribe?(listener: () => void): () => void
-}
+type ProjectionHook = <T>(key: string, selector: (value: unknown) => T) => T | undefined
 
-interface BindingLike {
-  session: {
-    getSnapshot(): { running?: boolean }
-    subscribe?(listener: () => void): () => void
-    projections?: {
-      faceOf(key: string): ProjectionStore<unknown> | undefined
-    }
-  }
-}
-
-interface CommandsRemote {
-  execute(
-    sessionId: string,
-    line: string,
-    attachments?: readonly unknown[],
-  ): Promise<{
-    ok: boolean
-    value?: { result: { kind: string; text?: string } }
-    error?: { message?: string }
-  }>
-}
-
-interface ClientContext {
-  sessions: {
-    binding(sessionId: string): BindingLike | undefined
-    subagentAddress?(sessionId: string): unknown
-  }
-  remote: { commands: CommandsRemote }
-  slots: {
-    inject(name: string, register: () => unknown): unknown
-    register(spec: Record<string, unknown>, component: unknown): unknown
-  }
-  locale: {
-    register(namespace: string, dictionaries: Record<string, Record<string, string>>): unknown
-  }
-  effect(callback: () => unknown): unknown
-}
-
-const NS = 'ultracode'
-
-const NOOP_SUBSCRIBE = (): (() => void) => () => {}
-
-function createStore(ctx: ClientContext, sessionId: string): {
-  getSnapshot: () => Snapshot
-  subscribe: (listener: () => void) => () => void
-  isSubagent: boolean
-} {
-  const binding = ctx.sessions.binding(sessionId)
-  const isSubagent = typeof ctx.sessions.subagentAddress === 'function'
-    && ctx.sessions.subagentAddress(sessionId) !== undefined
-  if (binding === undefined || isSubagent) {
-    return { getSnapshot: () => EMPTY, subscribe: NOOP_SUBSCRIBE, isSubagent }
-  }
-  const projection = binding.session.projections?.faceOf('ultracode') as ProjectionStore<UltraView> | undefined
-  const compute = (): Snapshot => ({
-    running: binding.session.getSnapshot().running === true,
-    ultra: projection?.getSnapshot(),
-  })
-  // useSyncExternalStore requires an identity-stable snapshot between store
-  // notifications; constructing a fresh object on every read causes React's
-  // maximum-update-depth loop.
-  let cached = compute()
-  const getSnapshot = (): Snapshot => cached
-  const update = (listener: () => void): void => {
-    const next = compute()
-    if (next.running === cached.running && next.ultra === cached.ultra) return
-    cached = next
-    listener()
-  }
-  const subscribe = (listener: () => void): (() => void) => {
-    const disposers: Array<() => void> = []
-    const offSession = binding.session.subscribe?.(() => update(listener))
-    if (offSession !== undefined) disposers.push(offSession)
-    const offProjection = projection?.subscribe?.(() => update(listener))
-    if (offProjection !== undefined) disposers.push(offProjection)
-    return () => {
-      for (const dispose of disposers) dispose()
-    }
-  }
-  return { getSnapshot, subscribe, isSubagent }
-}
-
-interface ControlProps {
-  readonly locked?: boolean
-  readonly onActiveChange?: (active: boolean) => void
+interface PrimaryActionProps extends PrimaryOwnerState {
+  /** The shipped primary action, rendered unchanged when the plugin declines. */
+  readonly defaultAction?: ReactNode
+  /** DSH's editor-focus guard; must be attached to the custom button's mousedown. */
+  readonly keepFocus?: (event: MouseEvent<HTMLButtonElement>) => void
+  /** Session standard prop: the Host-computed `ultracode` projection. */
+  readonly useProjection?: ProjectionHook
+  /** Localized `ultracode` namespace lookup. */
   readonly t?: (key: string) => string
-  readonly getSnapshot?: () => Snapshot
-  readonly subscribe?: (listener: () => void) => () => void
-  readonly isSubagent?: boolean
+  /** Command executor injected by the adapter; bound to this session. */
   readonly executeCommand?: (line: string) => Promise<void>
+}
+
+/** Used when the slot is rendered without a projection seat. */
+function noProjection<T>(_key: string, _selector: (value: unknown) => T): T | undefined {
+  return undefined
 }
 
 function PauseIcon(): JSX.Element {
@@ -123,81 +59,83 @@ function PlayIcon(): JSX.Element {
   )
 }
 
-function Control(props: ControlProps): JSX.Element | null {
+/** Matches the shipped 34px primary circle (DSH `InputBar.module.css`). */
+function primaryButtonStyle(disabled: boolean): CSSProperties {
+  return {
+    display: 'grid',
+    placeItems: 'center',
+    flex: 'none',
+    width: 34,
+    height: 34,
+    border: 'none',
+    borderRadius: 999,
+    background: 'var(--dsw-alias-button-info-fill)',
+    color: '#fff',
+    cursor: disabled ? 'default' : 'pointer',
+    opacity: disabled ? 0.4 : 1,
+    transform: 'translateY(-2px)',
+    transition: 'background-color 100ms ease',
+  }
+}
+
+function PrimaryAction(props: PrimaryActionProps): ReactNode {
   const {
+    defaultAction = null,
+    empty = false,
+    running = false,
+    subagent = false,
     locked = false,
-    onActiveChange,
+    machineBusy = false,
+    uploadsPending = false,
+    stopLive = false,
+    keepFocus = () => {},
+    useProjection = noProjection,
     t,
-    getSnapshot = () => EMPTY,
-    subscribe = NOOP_SUBSCRIBE,
-    isSubagent = false,
     executeCommand = async () => {},
   } = props
-  const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+  const projection = useProjection('ultracode', value => value as UltraView | undefined)
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
+  const view = primaryView({
+    empty,
+    running,
+    subagent,
+    locked,
+    machineBusy,
+    uploadsPending,
+    stopLive,
+    paused: projection?.paused === true,
+    phase: projection?.run?.phase,
+    pending,
+  })
 
-  useEffect(() => {
-    onActiveChange?.(false)
-    return () => onActiveChange?.(false)
-  }, [onActiveChange])
+  // Declining returns the exact shipped node, so Send/Stop/Steer and the
+  // disabled/aria states stay the bar's own.
+  if (view.kind === 'default') return defaultAction
 
-  if (isSubagent) return null
-  const view = controlView(snapshot)
-  if (view === 'hidden') return null
-
-  const waiting = waitingOnJob(snapshot)
-  const waitingLabel = waiting ? (t?.('waitingJob') ?? en.waitingJob) : undefined
-  const label = view === 'play'
-    ? (t?.('resume') ?? en.resume)
-    : (t?.('pause') ?? en.pause)
-  const accessibleLabel = waitingLabel === undefined ? label : `${label} — ${waitingLabel}`
-  const disabled = locked || pending
-
-  const onClick = async (): Promise<void> => {
-    if (disabled) return
+  const text: PrimaryText = primaryText(view, t)
+  const activate = (): void => {
+    if (view.disabled) return
+    const command = primaryCommand(view.kind)
+    if (command === undefined) return
     setPending(true)
     setError(undefined)
-    try {
-      await executeCommand(view === 'play' ? '/resume' : '/pause')
-    } catch (cause: unknown) {
-      setError(cause instanceof Error ? cause.message : String(cause))
-    } finally {
-      setPending(false)
-    }
+    void executeCommand(command)
+      .catch((cause: unknown) => {
+        setError(cause instanceof Error ? cause.message : String(cause))
+      })
+      .finally(() => { setPending(false) })
   }
+  const button = primaryButtonProps(view, text, { keepFocus, activate }, pending)
 
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center' }}>
-      <button
-        type="button"
-        aria-label={accessibleLabel}
-        title={accessibleLabel}
-        disabled={disabled}
-        onClick={() => { void onClick() }}
-        style={{
-          display: 'inline-flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          width: 28,
-          height: 28,
-          padding: 0,
-          border: 0,
-          borderRadius: '50%',
-          background: 'transparent',
-          color: 'var(--dsw-alias-label-secondary)',
-          cursor: disabled ? 'default' : 'pointer',
-          opacity: disabled ? 0.5 : 1,
-        }}
-      >
-        {view === 'play' ? <PlayIcon /> : <PauseIcon />}
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+      <button {...button} style={primaryButtonStyle(view.disabled)}>
+        {view.kind === 'play' ? <PlayIcon /> : <PauseIcon />}
       </button>
-      {waitingLabel === undefined ? null : (
-        <span
-          role="status"
-          style={{ marginLeft: 6, fontSize: 11, color: 'var(--dsw-alias-label-secondary)' }}
-        >
-          {waitingLabel}
+      {text.status === undefined ? null : (
+        <span role="status" style={{ fontSize: 11, color: 'var(--dsw-alias-label-secondary)' }}>
+          {text.status}
         </span>
       )}
       {error === undefined ? null : (
@@ -209,30 +147,11 @@ function Control(props: ControlProps): JSX.Element | null {
   )
 }
 
-function apply(ctx: ClientContext): void {
-  ctx.effect(() => ctx.locale.register(NS, { zh, en }))
-  ctx.slots.inject('conversation.input.activity', () => ctx.slots.register({
-    name: 'conversation.input.activity',
-    locale: NS,
-    inject: (sessionId: string) => {
-      const store = createStore(ctx, sessionId)
-      const executeCommand = async (line: string): Promise<void> => {
-        const result = await ctx.remote.commands.execute(sessionId, line, [])
-        if (!result.ok) throw new Error(result.error?.message ?? 'command failed')
-        if (result.value?.result.kind === 'error') {
-          throw new Error(result.value.result.text ?? 'command failed')
-        }
-      }
-      return {
-        getSnapshot: store.getSnapshot,
-        subscribe: store.subscribe,
-        isSubagent: store.isSubagent,
-        executeCommand,
-      }
-    },
-  }, Control))
+/** Client plugin entry: register the primary-slot occupant and its locale. */
+export function apply(ctx: PrimarySlotContext): void {
+  applyClient(ctx, PrimaryAction)
 }
 
-const inject = ['slots', 'sessions', 'remote', 'remote.commands', 'locale']
+const inject = ['slots', 'remote', 'remote.commands', 'locale']
 
-export { apply, inject }
+export { inject }

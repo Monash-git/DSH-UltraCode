@@ -3,7 +3,7 @@
   "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "DSH Ultra standing mode, autopilot, steering, pause/resume, and the composer play control.",
+  "description": "DSH Ultra standing mode, autopilot, steering, pause/resume, and the primary composer pause/play action.",
   "license": "MIT",
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",

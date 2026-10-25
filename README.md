@@ -81,14 +81,23 @@ user input; that race belongs to DSH's agent loop.
 
 ## Pause/play
 
-The composer activity seat shows a pause button while a root session is
-running and a play button while it is paused. Pause/Stop and crash-interrupted
-turns are saved durably; a Desktop restart restores the paused state. Play
-resumes an autopilot run with a continuation nudge, or an ordinary interrupted
-turn with a generic resume prompt. No automatic resume and no silent spend.
+The primary Send/Stop button becomes Pause while a root session is running (or
+an autopilot run is waiting on an owned background job) and the draft is
+empty; it becomes Play while the session is paused. With text or attachments
+the button stays the shipped Send/Steer action, and sending text while paused
+clears the pause and starts a new direction. Pause/Play is root-only:
+subagents, locked composers, and busy input states keep the default button.
 
-The control is a native slot contribution; it does not replace the Send/Stop
-button and does not use DOM/CSS injection. The Host commands `/pause` and
+Pause/Stop and crash-interrupted turns are saved durably; a Desktop restart
+restores the paused state. Play resumes an autopilot run with a continuation
+nudge, or an ordinary interrupted turn with a generic resume prompt. No
+automatic resume and no silent spend.
+
+The control is a native occupant of DSH's optional
+`conversation.input.primary` slot. It renders the shipped primary action
+unchanged whenever it does not own the state, does not use DOM/CSS injection,
+and adds no second pause button. A DSH build that does not declare that slot
+leaves the default Send/Stop button untouched. The Host commands `/pause` and
 `/resume` are the underlying actions.
 
 ## Session lifecycle
