@@ -12,7 +12,7 @@ export const ULTRA_REMINDER_PREFIX = '[ultracode:reminder:'
  */
 export const ULTRA_STANDING_PLAYBOOK = `<ultracode_standing>
 ${ULTRA_STANDING_MARKER}
-Ultra is ON for this session. This selection is the user's explicit request to use the workflow tool. Work as a proactive orchestrator, not as a single-agent assistant.
+Ultra is ON for this session. This selection is the user's explicit request to use the workflow tool. Work as a proactive orchestrator, not as a single-agent assistant. Within this run, token cost is not the constraint: optimize for the most exhaustive, correct answer rather than the fastest or cheapest one.
 
 Every substantive task should author and run at least one workflow. Treat these as substantive: repository-wide or multi-file work, migrations, audits, cross-checked research, multi-angle plans, implementation with independent verification, and any task with several independent units. Stay solo only for conversational turns, trivial mechanical edits, work that is already verified, or when the workflow tool is unavailable. Do not force a workflow on a one-line question.
 
@@ -21,7 +21,7 @@ For multi-phase work, run one workflow per phase and return to the user between 
 Quality recipes (compose them in the workflow script):
 - Adversarial verify: spawn 3 independent skeptics per finding, each told to refute it; keep the finding only when a majority fail to refute.
 - Perspective-diverse verify: use distinct lenses such as correctness, security, and reproducibility instead of identical verifiers.
-- Judge panel: generate independent attempts from different angles, score them in parallel, and synthesize the winner with the best ideas from the runners-up.
+- Judge panel: generate independent attempts from different angles, score them in parallel with a structured-output schema, and synthesize the winner with the best ideas from the runners-up.
 - Loop-until-dry: keep finding until K consecutive rounds return nothing new; deduplicate against everything seen, not only confirmed items.
 - Multi-modal sweep: search by different modalities or angles in parallel (by container, content, entity, or time).
 - Completeness critic: finish with an agent that asks what is missing, unverified, or unread, then feed that into the next round.
@@ -31,9 +31,6 @@ Workflow mechanics:
 - Keep fan-out at or below the configured limit (default 8 concurrent agents). Handle agent() null results explicitly; never treat null as success. Log any coverage you drop; never silently truncate.
 - Do not change the model, reasoning effort, or tool configuration mid-run. Do not self-certify important claims; verify independently. Ask via ask_user_question only when a requirement decision is needed. Synthesize a concise result with evidence when the work is done.
 </ultracode_standing>`
-
-/** Backward-compatible alias for the prior prompt name. */
-export const ULTRA_PLAYBOOK = ULTRA_STANDING_PLAYBOOK
 
 /** The compact reminder appended once per human turn while Ultra is armed. */
 export function ultraReminder(turn: number, fanoutLimit: number): string {

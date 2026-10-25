@@ -62,32 +62,37 @@ export function maxRoundsFor(
   return Math.min(config.maxRounds, requested)
 }
 
+interface SkillBudget {
+  readonly rounds: number
+  readonly longRun: boolean
+}
+
+const DEFAULT_BUDGET: SkillBudget = { rounds: 40, longRun: false }
+
+const SKILL_BUDGETS: Readonly<Record<string, SkillBudget>> = {
+  wayfinder: { rounds: 120, longRun: true },
+  implement: { rounds: 120, longRun: true },
+  ultra: { rounds: 120, longRun: true },
+  tdd: { rounds: 60, longRun: false },
+  'code-review': { rounds: 40, longRun: false },
+  'to-spec': { rounds: 40, longRun: false },
+  'to-tickets': { rounds: 40, longRun: false },
+  research: { rounds: 30, longRun: false },
+  'setup-matt-pocock-skills': { rounds: 30, longRun: false },
+}
+
+function budgetFor(skill: string): SkillBudget {
+  return SKILL_BUDGETS[skill] ?? DEFAULT_BUDGET
+}
+
 /** Resolve the effective elapsed-time cap for one run. */
 export function maxDurationFor(skill: string, config: ResolvedConfig): number {
-  const requested = skill === 'wayfinder' || skill === 'implement' || skill === 'ultra'
-    ? DEFAULT_MAX_DURATION_MS
-    : SHORT_SKILL_DURATION_MS
+  const requested = budgetFor(skill).longRun ? DEFAULT_MAX_DURATION_MS : SHORT_SKILL_DURATION_MS
   return Math.min(config.maxDurationMs, requested)
 }
 
 function defaultRoundsFor(skill: string): number {
-  switch (skill) {
-    case 'wayfinder':
-    case 'implement':
-    case 'ultra':
-      return 120
-    case 'tdd':
-      return 60
-    case 'code-review':
-    case 'to-spec':
-    case 'to-tickets':
-      return 40
-    case 'research':
-    case 'setup-matt-pocock-skills':
-      return 30
-    default:
-      return 40
-  }
+  return budgetFor(skill).rounds
 }
 
 function positiveInteger(name: string, value: number): number {

@@ -72,6 +72,17 @@ describe('UltraModeController', () => {
     expect(JSON.stringify(additions[0])).toContain(ULTRA_STANDING_MARKER)
   })
 
+  it('re-anchors the full playbook on an explicit resume request', () => {
+    const { agent, session } = fakeAgent()
+    selectUltra(session)
+    appendPlaybook(session)
+    const controller = new UltraModeController(resolveConfig())
+    controller.requestFullPlaybook(agent)
+    const additions = controller.onPreStep({ agent, messages: [], turn: 2, step: 1 })
+    expect(additions).toHaveLength(1)
+    expect(JSON.stringify(additions[0])).toContain(ULTRA_STANDING_MARKER)
+  })
+
   it('re-injects the full playbook after compaction', () => {
     const { agent, session } = fakeAgent()
     selectUltra(session)

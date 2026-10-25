@@ -13,7 +13,6 @@ import {
   appendModeEvent,
   createRunState,
   latestModeEvent,
-  latestModelSelection,
   latestRunEvent,
   sessionKey,
 } from '../src/state.js'
@@ -52,8 +51,10 @@ function fakeContext(overrides: Partial<CommandContext> = {}): {
     setCommandMode: vi.fn((agent: Agent, enabled: boolean) => {
       appendModeEvent(agent, enabled, enabled ? 'command' : 'off', 'command')
     }),
+    requestFullPlaybook: vi.fn(),
   } as unknown as CommandContext['ultra']
-  return { context: { runs, pause, ultra }, pause, ultra, runs }
+  const selectMax = vi.fn()
+  return { context: { runs, pause, ultra, selectMax }, pause, ultra, runs, selectMax }
 }
 
 describe('/ultra command', () => {
@@ -71,9 +72,9 @@ describe('/ultra command', () => {
     expect(latestRunEvent(agent.session.snapshotEvents())).toBeUndefined()
   })
 
-  it('turns the mode off and selects max when the selector is ultra', () => {
+  it('turns the mode off and asks the session controller to select max', () => {
     const { agent, followup } = fakeAgent()
-    const { context, ultra } = fakeContext()
+    const { context, ultra, selectMax } = fakeContext()
     agent.session.append('model/selection', {
       provider: 'deepseek-official',
       model: 'mock',
@@ -84,8 +85,8 @@ describe('/ultra command', () => {
 
     expect(result.kind).toBe('success')
     expect(ultra.setCommandMode).toHaveBeenCalledWith(agent, false)
+    expect(selectMax).toHaveBeenCalledWith(agent)
     expect(followup).not.toHaveBeenCalled()
-    expect(latestModelSelection(agent.session.snapshotEvents())?.reasoningEffort).toBe('max')
     expect(latestModeEvent(agent.session.snapshotEvents())?.enabled).toBe(false)
   })
 
@@ -124,21 +125,23 @@ describe('/autopilot command', () => {
 
   it('pauses and resumes through the pause controller', () => {
     const { agent } = fakeAgent()
-    const { context, pause } = fakeContext()
+    const { context, pause, ultra } = fakeContext()
     expect(handleAutopilotCommand(agent, 'pause', context).kind).toBe('success')
     expect(pause.pause).toHaveBeenCalledWith(agent)
     expect(handleAutopilotCommand(agent, 'resume', context).kind).toBe('success')
     expect(pause.resume).toHaveBeenCalledWith(agent)
+    expect(ultra.requestFullPlaybook).toHaveBeenCalledWith(agent)
   })
 })
 
 describe('/pause and /resume commands', () => {
-  it('delegate to the pause controller', () => {
+  it('delegate to the pause controller and re-anchor Ultra on resume', () => {
     const { agent } = fakeAgent()
-    const { context, pause } = fakeContext()
+    const { context, pause, ultra } = fakeContext()
     expect(handlePauseCommand(agent, context).kind).toBe('success')
     expect(handleResumeCommand(agent, context).kind).toBe('success')
     expect(pause.pause).toHaveBeenCalledWith(agent)
     expect(pause.resume).toHaveBeenCalledWith(agent)
+    expect(ultra.requestFullPlaybook).toHaveBeenCalledWith(agent)
   })
 })

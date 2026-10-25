@@ -66,6 +66,11 @@ export class PauseController {
     }
 
     const run = this.runs.get(key)
+    if (run !== undefined && run.phase === 'waiting_user') {
+      // A model question is an answer-pending state, not the play-button pause.
+      this.paused.delete(key)
+      return
+    }
     if (run !== undefined && isUnfinishedPhase(run.phase)) {
       run.phase = 'paused_resume'
       run.reason = 'session restarted'
@@ -128,28 +133,41 @@ export class PauseController {
         this.clear(agent, 'cleared')
         return { ok: false, text: 'The run has reached its round limit.' }
       }
-      run.round += 1
+      const previous = { phase: run.phase, round: run.round, reason: run.reason }
+      const nextRound = run.round + 1
+      try {
+        agent.steer(createUserMessage({
+          content: [{
+            type: 'text',
+            text: continuationNudge(run.skill, nextRound, run.maxRounds, todoSummary(agent), 'resumed by user'),
+          }],
+          source: { kind: 'autopilot' },
+        }))
+      } catch (error: unknown) {
+        run.phase = previous.phase
+        run.round = previous.round
+        run.reason = previous.reason
+        return { ok: false, text: `Unable to resume the run: ${error instanceof Error ? error.message : String(error)}` }
+      }
+      run.round = nextRound
       run.phase = 'running'
       run.reason = 'resumed by user'
       appendRunEvent(agent, run)
       this.clear(agent, 'resumed')
-      agent.steer(createUserMessage({
-        content: [{
-          type: 'text',
-          text: continuationNudge(run.skill, run.round, run.maxRounds, todoSummary(agent), 'resumed by user'),
-        }],
-        source: { kind: 'autopilot' },
-      }))
       return { ok: true, text: `Autopilot resumed for ${run.skill}.` }
     }
     if (!this.paused.has(key)) {
       return { ok: false, text: 'No paused session to resume.' }
     }
+    try {
+      agent.steer(createUserMessage({
+        content: [{ type: 'text', text: genericResumeNudge(todoSummary(agent)) }],
+        source: { kind: 'ultracode' },
+      }))
+    } catch (error: unknown) {
+      return { ok: false, text: `Unable to resume the session: ${error instanceof Error ? error.message : String(error)}` }
+    }
     this.clear(agent, 'resumed')
-    agent.steer(createUserMessage({
-      content: [{ type: 'text', text: genericResumeNudge(todoSummary(agent)) }],
-      source: { kind: 'ultracode' },
-    }))
     return { ok: true, text: 'Session resumed.' }
   }
 

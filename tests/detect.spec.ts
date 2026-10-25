@@ -27,9 +27,12 @@ describe('hasUltracodeToken', () => {
     expect(hasUltracodeToken([user('no ultracode here')])).toBe(true)
   })
 
-  it('ignores code examples', () => {
+  it('ignores code and quoted examples', () => {
     expect(hasUltracodeToken([user('use `ultracode` as an example')])).toBe(false)
     expect(hasUltracodeToken([user('```\nultracode\n```')])).toBe(false)
+    expect(hasUltracodeToken([user('the word "ultracode" is quoted')])).toBe(false)
+    expect(hasUltracodeToken([user("the word 'ultracode' is quoted")])).toBe(false)
+    expect(hasUltracodeToken([user('中文“ultracode”也是引用')])).toBe(false)
     expect(stripCode('before `ultracode` after')).not.toContain('ultracode')
   })
 })

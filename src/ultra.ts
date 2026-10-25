@@ -37,6 +37,7 @@ export interface UltraPreStep {
 export class UltraModeController {
   private readonly commandMode = new Set<string>()
   private readonly active = new Set<string>()
+  private readonly forceFullPlaybook = new Set<string>()
 
   constructor(private readonly config: ResolvedConfig) {}
 
@@ -76,11 +77,17 @@ export class UltraModeController {
     return this.commandMode.has(sessionKey(agent))
   }
 
+  /** Force the next armed step to re-anchor the full playbook (resume). */
+  requestFullPlaybook(agent: Agent): void {
+    this.forceFullPlaybook.add(sessionKey(agent))
+  }
+
   /** Drop in-memory state when the agent is disposed. */
   dispose(agent: Agent): void {
     const key = sessionKey(agent)
     this.commandMode.delete(key)
     this.active.delete(key)
+    this.forceFullPlaybook.delete(key)
   }
 
   /** Append the playbook and/or the per-turn reminder for this step. */
@@ -106,7 +113,8 @@ export class UltraModeController {
     if (!wasActive) appendModeEvent(agent, true, 'standing mode on', selector ? 'selector' : command ? 'command' : 'keyword')
 
     const additions: UserMessage[] = []
-    const hasPlaybook = hasFullPlaybookSinceCompaction(agent, ULTRA_STANDING_MARKER)
+    const forceFullPlaybook = this.forceFullPlaybook.delete(key)
+    const hasPlaybook = !forceFullPlaybook && hasFullPlaybookSinceCompaction(agent, ULTRA_STANDING_MARKER)
     if (!hasPlaybook) {
       additions.push(createUserMessage({
         content: [{ type: 'text', text: ULTRA_STANDING_PLAYBOOK }],

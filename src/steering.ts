@@ -5,7 +5,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { BusyEnterDefault, ResolvedConfig } from './config.js'
+import type { ResolvedConfig } from './config.js'
 
 interface SettingsRow {
   readonly ns: string
@@ -28,35 +28,36 @@ export function installBusyEnterDefault(ctx: Context, config: ResolvedConfig): (
 
   let off: (() => void) | undefined
   let applied = false
+  let pending = false
 
-  const attempt = (settings: SettingsLike): boolean => {
+  const attempt = (settings: SettingsLike): void => {
+    if (applied || pending) return
     const row = settings.describe().find(candidate => candidate.ns === NAMESPACE)
-    if (row === undefined) return false
+    if (row === undefined) return
     const user = row.user ?? {}
     if (Object.hasOwn(user, FIELD)) {
       applied = true
-      return true
+      return
     }
     const current = row.value?.[FIELD]
     if (config.busyEnterDefault === 'queue' && current === 'queue') {
       applied = true
-      return true
+      return
     }
-    void settings.update(NAMESPACE, { [FIELD]: config.busyEnterDefault }, row.revision).catch((error: unknown) => {
-      console.error('[dsh-ultracode] unable to set the default busy-enter behavior:', error)
-    })
-    applied = true
-    return true
+    pending = true
+    void Promise.resolve(settings.update(NAMESPACE, { [FIELD]: config.busyEnterDefault }, row.revision))
+      .then(() => { applied = true })
+      .catch((error: unknown) => {
+        console.error('[dsh-ultracode] unable to set the default busy-enter behavior:', error)
+      })
+      .finally(() => { pending = false })
   }
 
   const fiber = ctx.inject(['settings'], scoped => {
     const settings = (scoped as unknown as { settings: SettingsLike }).settings
-    if (attempt(settings)) return
+    attempt(settings)
     off = scoped.on('settings/document-updated' as never, (() => {
-      if (!applied && attempt(settings)) {
-        off?.()
-        off = undefined
-      }
+      attempt(settings)
     }) as never)
   })
 
@@ -64,9 +65,4 @@ export function installBusyEnterDefault(ctx: Context, config: ResolvedConfig): (
     off?.()
     void Promise.resolve(fiber).then(child => child.dispose()).catch(() => {})
   }
-}
-
-/** The default value exposed for tests and status text. */
-export function busyEnterDefault(config: ResolvedConfig): BusyEnterDefault {
-  return config.busyEnterDefault
 }

@@ -32,7 +32,13 @@ export function textOf(message: UserMessage): string {
   return parts.join('\n')
 }
 
-/** Remove fenced and inline code so keyword detection ignores examples. */
+/** Remove fenced/inline code and quoted strings so keyword detection ignores examples. */
 export function stripCode(text: string): string {
-  return text.replace(/```[\s\S]*?```/g, ' ').replace(/`[^`]*`/g, ' ')
+  return text
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`[^`]*`/g, ' ')
+    .replace(/"[^"\n]*"/g, ' ')
+    .replace(/'[^'\n]*'/g, ' ')
+    .replace(/“[^”\n]*”/g, ' ')
+    .replace(/‘[^’\n]*’/g, ' ')
 }

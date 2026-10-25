@@ -4,7 +4,7 @@ import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { describe, expect, it, vi } from 'vitest'
 import { resolveConfig } from '../src/config.js'
 import { PauseController } from '../src/pause.js'
-import { createRunState, latestPauseEvent, latestRunEvent, sessionKey } from '../src/state.js'
+import { appendRunEvent, createRunState, latestPauseEvent, latestRunEvent, sessionKey } from '../src/state.js'
 
 function fakeAgent(status: 'idle' | 'running' = 'running') {
   const session = Session.create(SessionId(`pause-${Math.random().toString(36).slice(2)}`))
@@ -66,6 +66,17 @@ describe('PauseController', () => {
     expect(latestPauseEvent(agent.session.snapshotEvents())?.reason).toBe('interrupted')
   })
 
+  it('keeps a model question in waiting_user instead of the play-button pause', () => {
+    const { agent, pause, runs } = setup('idle')
+    const run = createRunState('tdd', resolveConfig())
+    run.phase = 'waiting_user'
+    runs.set(sessionKey(agent), run)
+    appendRunEvent(agent, run)
+    pause.onCreated(agent)
+    expect(pause.isPaused(agent)).toBe(false)
+    expect(latestRunEvent(agent.session.snapshotEvents())?.phase).toBe('waiting_user')
+  })
+
   it('clears a pause when the user starts a new direction', () => {
     const { agent, pause, runs } = setup()
     const run = createRunState('tdd', resolveConfig())
@@ -79,6 +90,16 @@ describe('PauseController', () => {
     expect(cleared).toBe(true)
     expect(pause.isPaused(agent)).toBe(false)
     expect(latestRunEvent(agent.session.snapshotEvents())?.phase).toBe('cancelled')
+  })
+
+  it('leaves the pause intact when the resume steer fails', () => {
+    const { agent, pause, steer } = setup()
+    pause.pause(agent)
+    steer.mockImplementation(() => { throw new Error('session closed') })
+    const resumed = pause.resume(agent)
+    expect(resumed.ok).toBe(false)
+    expect(pause.isPaused(agent)).toBe(true)
+    expect(latestPauseEvent(agent.session.snapshotEvents())?.paused).toBe(true)
   })
 
   it('does not record a pause for an explicit autopilot off', () => {

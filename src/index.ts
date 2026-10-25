@@ -22,7 +22,7 @@ import {
 import { evaluateCompletion } from './completion.js'
 import { resolveConfig, type PluginConfig } from './config.js'
 import { findSkillInvocation, hasUserMessage } from './detect.js'
-import { installUltraEffort } from './effort.js'
+import { registerUltraEffort } from './effort.js'
 import { PauseController } from './pause.js'
 import { registerUltracodeProjection } from './projection.js'
 import {
@@ -40,6 +40,7 @@ import {
   isRootAgent,
   isUnfinishedPhase,
   lastAssistantEndsWithQuestion,
+  latestModelSelection,
   latestRunEvent,
   latestTodos,
   progressDigest,
@@ -56,21 +57,77 @@ export const inject = ['tools', 'commands', 'workingDirectory']
 export function apply(ctx: Context, config: PluginConfig = {}): void {
   const settings = resolveConfig(config)
   const runs = new Map<string, RunState>()
+  const liveAgents = new Map<string, Agent>()
   const pause = new PauseController(settings, runs)
   const ultra = new UltraModeController(settings)
-  const commands: CommandContext = { runs, pause, ultra }
-
-  if (settings.ultraEffort) {
-    const restoreEffort = installUltraEffort(ctx)
-    ctx.effect(() => restoreEffort)
+  const selectMax = (agent: Agent): void => {
+    const selection = latestModelSelection(agent.session.snapshotEvents())
+    if (selection?.reasoningEffort !== 'ultra') return
+    const fallback = (): void => {
+      ;(agent.session as unknown as {
+        append(type: string, data: unknown): unknown
+      }).append('model/selection', {
+        provider: selection.provider,
+        model: selection.model,
+        reasoningEffort: 'max',
+      })
+    }
+    const controller = ctx.get('sessionController') as {
+      selectModel(request: {
+        sessionId: typeof agent.session.id
+        provider: string
+        model: string
+        reasoningEffort: 'max'
+      }): Promise<unknown>
+    } | undefined
+    if (controller === undefined) {
+      fallback()
+      return
+    }
+    void controller.selectModel({
+      sessionId: agent.session.id,
+      provider: selection.provider,
+      model: selection.model,
+      reasoningEffort: 'max',
+    }).catch((error: unknown) => {
+      console.error('[dsh-ultracode] unable to select Max through the session controller:', error)
+      fallback()
+    })
   }
+  const commands: CommandContext = { runs, pause, ultra, selectMax }
+
+  ctx.effect(() => () => {
+    for (const agent of liveAgents.values()) {
+      try {
+        const run = runs.get(sessionKey(agent))
+        if (run !== undefined && isUnfinishedPhase(run.phase)) {
+          run.phase = 'cancelled'
+          run.reason = 'plugin unloaded'
+          appendRunEvent(agent, run)
+        }
+        selectMax(agent)
+      } catch (error: unknown) {
+        console.error('[dsh-ultracode] unload cleanup failed:', error)
+      }
+    }
+    liveAgents.clear()
+  })
+
+  if (settings.ultraEffort) registerUltraEffort(ctx)
 
   const stopSteering = installBusyEnterDefault(ctx, settings)
   ctx.effect(() => stopSteering)
   registerUltracodeProjection(ctx)
 
-  ctx.on('agent/created', ({ agent }: { agent: Agent }) => {
+  ctx.on('agent/created', ({ agent, source }) => {
     const key = sessionKey(agent)
+    liveAgents.set(key, agent)
+    if (source === 'clear') {
+      runs.delete(key)
+      pause.dispose(agent)
+      ultra.dispose(agent)
+      return undefined
+    }
     const events = agent.session.snapshotEvents()
     const event = latestRunEvent(events)
     if (event !== undefined) {
@@ -80,11 +137,15 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
     }
     pause.onCreated(agent)
     ultra.onCreated(agent)
+    if (pause.isPaused(agent) || runs.get(key)?.phase === 'paused_resume') {
+      ultra.requestFullPlaybook(agent)
+    }
     return undefined
   })
 
   ctx.on('agent/disposed', ({ agent }: { agent: Agent }) => {
     const key = sessionKey(agent)
+    liveAgents.delete(key)
     runs.delete(key)
     pause.dispose(agent)
     ultra.dispose(agent)

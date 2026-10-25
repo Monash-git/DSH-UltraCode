@@ -154,6 +154,30 @@ function createWaitTool() {
   return { tool, started, release: () => releaseResolve() }
 }
 
+function createWorkflowTool() {
+  const calls = []
+  const tool = defineTool({
+    name: 'workflow',
+    description: 'Fake DSH workflow tool used to observe a substantive workflow call.',
+    parameters: {
+      script: { type: 'string', required: true },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { ok: { type: 'boolean', required: true } },
+      },
+      render: () => [{ type: 'text', text: 'workflow complete' }],
+    },
+    async execute(args) {
+      calls.push(args)
+      return { ok: true }
+    },
+  })
+  return { tool, calls }
+}
+
 let sessionSeq = 0
 const tempDir = await mkdtemp(join(tmpdir(), 'dsh-ultracode-v2-'))
 
@@ -171,11 +195,13 @@ async function createHarness(script, options = {}) {
   await ctx.plugin(SkillRegistry)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(AgentLoop, { agents: [] })
-  await ctx.plugin(ultraPlugin, options.pluginConfig ?? {})
-  await ctx.plugin(skillsPlugin)
+  if (options.plugins !== 'skills') await ctx.plugin(ultraPlugin, options.pluginConfig ?? {})
+  if (options.plugins !== 'ultra') await ctx.plugin(skillsPlugin)
 
   const wait = options.waitTool === true ? createWaitTool() : undefined
   if (wait !== undefined) ctx.tools.register(wait.tool)
+  const workflow = options.workflowTool === true ? createWorkflowTool() : undefined
+  if (workflow !== undefined) ctx.tools.register(workflow.tool)
 
   ctx.llm.registerAdapter(['deepseek-official'], adapter)
   const handle = await ctx.agents.create({
@@ -192,7 +218,7 @@ async function createHarness(script, options = {}) {
     },
   })
   await new Promise(resolve => setTimeout(resolve, 10))
-  return { ctx, adapter, agent: handle.agent, handle, wait }
+  return { ctx, adapter, agent: handle.agent, handle, wait, workflow }
 }
 
 function user(text) {
@@ -339,6 +365,7 @@ async function scenarioPauseResume() {
       JSON.stringify(h.adapter.requests[1].messages).includes('ultracode_resume'),
       'a normal paused session should receive the generic resume prompt',
     )
+    assertCacheStable(h.adapter.requests[0], h.adapter.requests[1], h.agent.session.snapshotEvents())
     const cleared = h.agent.session.snapshotEvents()
       .filter(event => event.type === 'ultracode/pause')
       .at(-1)
@@ -349,8 +376,131 @@ async function scenarioPauseResume() {
   }
 }
 
+async function scenarioUltraWorkflow() {
+  const h = await createHarness([
+    toolCallResponse('call-workflow', 'workflow', { script: 'return { ok: true }' }, 'Planning.'),
+    textResponse('Workflow report.'),
+  ], { requestUltra: true, workflowTool: true })
+  try {
+    ;(h.agent.session).append('model/selection', {
+      provider: 'deepseek-official',
+      model: 'mock',
+      reasoningEffort: 'ultra',
+    })
+    h.agent.followup(user('audit the repository'))
+    await withTimeout(h.agent.whenIdle(), 'ultra workflow scenario')
+    assert.equal(h.workflow.calls.length, 1, 'the substantive task should call the workflow tool')
+    assert.equal(h.adapter.requests.length, 2, 'a workflow tool call should continue the same turn')
+    assert.ok(JSON.stringify(h.adapter.requests[0].messages).includes('[ultracode:standing]'))
+    assert.equal(runPhases(h.agent).length, 0, 'Ultra must not create an autopilot run')
+    assertCacheStable(h.adapter.requests[0], h.adapter.requests[1], h.agent.session.snapshotEvents())
+    return { scenario: 'ultra-workflow', requests: h.adapter.requests.length, workflowCalls: h.workflow.calls.length }
+  } finally {
+    await h.handle.dispose()
+  }
+}
+
+async function scenarioQuestion() {
+  const h = await createHarness([
+    textResponse('Which file should I change?'),
+    toolCallResponse('call-question', 'complete_run', { summary: 'question answered' }, 'Completing.'),
+  ])
+  try {
+    h.agent.followup(user('/tdd'))
+    await withTimeout(h.agent.whenIdle(), 'question first stop')
+    assert.ok(runPhases(h.agent).includes('waiting_user'), 'the run should wait for the user')
+    assert.ok(!h.agent.session.snapshotEvents().some(event => event.type === 'ultracode/pause' && event.data.paused === true), 'a question is not the play-button pause')
+
+    h.agent.followup(user('Change src/example.ts'))
+    await withTimeout(h.agent.whenIdle(), 'question answer')
+    assert.ok(runPhases(h.agent).includes('completed'), 'the answer should resume and complete the run')
+    return { scenario: 'question', requests: h.adapter.requests.length, phases: runPhases(h.agent) }
+  } finally {
+    await h.handle.dispose()
+  }
+}
+
+async function scenarioAutopilotPause() {
+  const h = await createHarness([
+    toolCallResponse('call-wait', 'wait_tool', {}, 'Waiting.'),
+    toolCallResponse('call-complete', 'complete_run', { summary: 'pause resume complete' }, 'Completing.'),
+  ], { waitTool: true })
+  try {
+    h.agent.followup(user('/tdd'))
+    await withTimeout(h.wait.started, 'autopilot pause wait start')
+    const paused = await h.ctx.commands.execute(h.agent, '/pause', [], new AbortController().signal)
+    assert.ok(paused, 'the pause command should be registered')
+    h.wait.release()
+    await withTimeout(h.agent.whenIdle(), 'autopilot pause settle')
+    assert.ok(runPhases(h.agent).includes('paused_user'), 'the run should be paused_user')
+    assert.ok(h.agent.session.snapshotEvents().some(event => event.type === 'ultracode/pause' && event.data.paused === true))
+
+    const resumed = await h.ctx.commands.execute(h.agent, '/resume', [], new AbortController().signal)
+    assert.ok(resumed, 'the resume command should be registered')
+    await withTimeout(h.agent.whenIdle(), 'autopilot resume settle')
+    assert.ok(runPhases(h.agent).includes('completed'), 'the resumed run should complete')
+    assert.ok(JSON.stringify(h.adapter.requests.at(-1)?.messages).includes('autopilot_continue'))
+    return { scenario: 'autopilot-pause', requests: h.adapter.requests.length, phases: runPhases(h.agent) }
+  } finally {
+    await h.handle.dispose()
+  }
+}
+
+async function scenarioRoundCap() {
+  const h = await createHarness([
+    textResponse('I will stop here.'),
+    textResponse('I will stop again.'),
+    textResponse('Final report.'),
+  ], { pluginConfig: { maxRounds: 2 } })
+  try {
+    h.agent.followup(user('/tdd'))
+    await withTimeout(h.agent.whenIdle(), 'round cap scenario')
+    assert.equal(h.adapter.requests.length, 3, 'the round cap should allow one continuation and one wrap-up')
+    assert.ok(runPhases(h.agent).includes('exhausted'))
+    assert.ok(JSON.stringify(h.adapter.requests[2].messages).includes('autopilot_wrap_up'))
+    return { scenario: 'round-cap', requests: h.adapter.requests.length, phases: runPhases(h.agent) }
+  } finally {
+    await h.handle.dispose()
+  }
+}
+
+async function scenarioIndependentInstall() {
+  const skillsOnly = await createHarness([], { plugins: 'skills' })
+  try {
+    const cwd = await skillsOnly.ctx.workingDirectory.ensure(skillsOnly.agent, new AbortController().signal)
+    const skill = await skillsOnly.ctx.skills.get('tdd', { cwd, scope: skillsOnly.agent })
+    assert.ok(skill, 'the skills package should provide tdd without ultracode')
+    const info = await skillsOnly.ctx.llm.resolveModelInfo('deepseek-official', 'mock')
+    assert.ok(!info.reasoning?.efforts.some(effort => effort.id === 'ultra'), 'skills-only must not offer Ultra')
+  } finally {
+    await skillsOnly.handle.dispose()
+  }
+
+  const ultraOnly = await createHarness([], { plugins: 'ultra' })
+  try {
+    const info = await ultraOnly.ctx.llm.resolveModelInfo('deepseek-official', 'mock')
+    assert.ok(info.reasoning?.efforts.some(effort => effort.id === 'ultra'), 'ultracode-only should offer Ultra')
+    const cwd = await ultraOnly.ctx.workingDirectory.ensure(ultraOnly.agent, new AbortController().signal)
+    const skill = await ultraOnly.ctx.skills.get('tdd', { cwd, scope: ultraOnly.agent })
+    assert.equal(skill, undefined, 'ultracode-only must not provide the adapted skills')
+    return { scenario: 'independent-install', skillsOnly: true, ultraOnly: true }
+  } finally {
+    await ultraOnly.handle.dispose()
+  }
+}
+
 const results = []
-for (const scenario of [scenarioTdd, scenarioUltra, scenarioSteer, scenarioPauseResume]) {
+for (const scenario of [
+  scenarioTdd,
+  scenarioUltra,
+  scenarioUltraWorkflow,
+  scenarioSteer,
+  scenarioPauseResume,
+  scenarioAutopilotPause,
+  scenarioQuestion,
+  scenarioRoundCap,
+  scenarioIndependentInstall,
+]) {
   results.push(await scenario())
 }
 console.log(JSON.stringify({ ok: true, results }, null, 2))

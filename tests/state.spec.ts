@@ -55,7 +55,6 @@ describe('run state', () => {
 
     const restored = fromRunEvent(runEvent!, config)
     expect(restored.skill).toBe('implement')
-    expect(restored.playbookInjected).toBe(true)
     expect(isUnfinishedPhase(restored.phase)).toBe(true)
   })
 
@@ -112,7 +111,9 @@ describe('run state', () => {
       content: [],
       source: { kind: 'user' as const },
     }
+    const injected = { ...message, source: { kind: 'autopilot' as const } }
     expect(inboxHasUserWork({ inbox: { nextTurn: [], nextStep: [] } } as never)).toBe(false)
+    expect(inboxHasUserWork({ inbox: { nextTurn: [injected], nextStep: [] } } as never)).toBe(false)
     expect(inboxHasUserWork({ inbox: { nextTurn: [message], nextStep: [] } } as never)).toBe(true)
     expect(inboxHasUserWork({ inbox: { nextTurn: [], nextStep: [message] } } as never)).toBe(true)
   })

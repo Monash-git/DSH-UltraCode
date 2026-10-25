@@ -4,13 +4,15 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { CommandResult } from '@deepseek-ai/dsh-commands'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { PauseController } from './pause.js'
-import { appendRunEvent, latestModelSelection, sessionKey, type RunState } from './state.js'
+import { appendRunEvent, sessionKey, type RunState } from './state.js'
 import type { UltraModeController } from './ultra.js'
 
 export interface CommandContext {
   readonly runs: Map<string, RunState>
   readonly pause: PauseController
   readonly ultra: UltraModeController
+  /** Switch the live session selection from Ultra to Max through the session controller. */
+  selectMax(agent: Agent): void
 }
 
 /** Handle `/autopilot [status|off|pause|resume]`. */
@@ -50,6 +52,7 @@ export function handleAutopilotCommand(
 
   if (input === 'resume') {
     const outcome = context.pause.resume(agent)
+    if (outcome.ok) context.ultra.requestFullPlaybook(agent)
     return outcome.ok ? { kind: 'success', text: outcome.text } : { kind: 'error', text: outcome.text }
   }
 
@@ -65,6 +68,7 @@ export function handlePauseCommand(agent: Agent, context: CommandContext): Comma
 /** Handle `/resume`. */
 export function handleResumeCommand(agent: Agent, context: CommandContext): CommandResult {
   const outcome = context.pause.resume(agent)
+  if (outcome.ok) context.ultra.requestFullPlaybook(agent)
   return outcome.ok ? { kind: 'success', text: outcome.text } : { kind: 'error', text: outcome.text }
 }
 
@@ -96,17 +100,8 @@ export function handleUltraCommand(
 
   if (lower === 'off') {
     context.ultra.setCommandMode(agent, false)
-    const selection = latestModelSelection(agent.session.snapshotEvents())
-    if (selection?.reasoningEffort === 'ultra') {
-      ;(agent.session as unknown as {
-        append(type: string, data: unknown): unknown
-      }).append('model/selection', {
-        provider: selection.provider,
-        model: selection.model,
-        reasoningEffort: 'max',
-      })
-    }
-    return { kind: 'success', text: 'Ultra mode off. Select Max in the model menu if the selector still shows Ultra.' }
+    context.selectMax(agent)
+    return { kind: 'success', text: 'Ultra mode off.' }
   }
 
   context.ultra.setCommandMode(agent, true)

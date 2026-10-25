@@ -5,18 +5,9 @@
  */
 
 import { useEffect, useState, useSyncExternalStore } from 'react'
-
-interface UltraView {
-  readonly paused?: boolean
-  readonly reason?: string | null
-  readonly run?: { readonly phase?: string } | null
-  readonly mode?: string
-}
-
-interface Snapshot {
-  readonly running: boolean
-  readonly ultra: UltraView | undefined
-}
+import en from '../../locale/en.json' with { type: 'json' }
+import zh from '../../locale/zh.json' with { type: 'json' }
+import { controlView, EMPTY, type Snapshot, type UltraView } from './view.js'
 
 interface ProjectionStore<T> {
   getSnapshot(): T
@@ -62,20 +53,8 @@ interface ClientContext {
 }
 
 const NS = 'ultracode'
-const zh = {
-  pause: '暂停',
-  resume: '继续',
-  paused: '已暂停',
-  running: '运行中',
-}
-const en = {
-  pause: 'Pause',
-  resume: 'Resume',
-  paused: 'Paused',
-  running: 'Running',
-}
 
-const EMPTY: Snapshot = { running: false, ultra: undefined }
+const NOOP_SUBSCRIBE = (): (() => void) => () => {}
 
 function createStore(ctx: ClientContext, sessionId: string): {
   getSnapshot: () => Snapshot
@@ -86,18 +65,29 @@ function createStore(ctx: ClientContext, sessionId: string): {
   const isSubagent = typeof ctx.sessions.subagentAddress === 'function'
     && ctx.sessions.subagentAddress(sessionId) !== undefined
   if (binding === undefined || isSubagent) {
-    return { getSnapshot: () => EMPTY, subscribe: () => () => {}, isSubagent }
+    return { getSnapshot: () => EMPTY, subscribe: NOOP_SUBSCRIBE, isSubagent }
   }
   const projection = binding.session.projections?.faceOf('ultracode') as ProjectionStore<UltraView> | undefined
-  const getSnapshot = (): Snapshot => ({
+  const compute = (): Snapshot => ({
     running: binding.session.getSnapshot().running === true,
     ultra: projection?.getSnapshot(),
   })
+  // useSyncExternalStore requires an identity-stable snapshot between store
+  // notifications; constructing a fresh object on every read causes React's
+  // maximum-update-depth loop.
+  let cached = compute()
+  const getSnapshot = (): Snapshot => cached
+  const update = (listener: () => void): void => {
+    const next = compute()
+    if (next.running === cached.running && next.ultra === cached.ultra) return
+    cached = next
+    listener()
+  }
   const subscribe = (listener: () => void): (() => void) => {
     const disposers: Array<() => void> = []
-    const offSession = binding.session.subscribe?.(listener)
+    const offSession = binding.session.subscribe?.(() => update(listener))
     if (offSession !== undefined) disposers.push(offSession)
-    const offProjection = projection?.subscribe?.(listener)
+    const offProjection = projection?.subscribe?.(() => update(listener))
     if (offProjection !== undefined) disposers.push(offProjection)
     return () => {
       for (const dispose of disposers) dispose()
@@ -107,7 +97,6 @@ function createStore(ctx: ClientContext, sessionId: string): {
 }
 
 interface ControlProps {
-  readonly sessionId?: string
   readonly locked?: boolean
   readonly onActiveChange?: (active: boolean) => void
   readonly t?: (key: string) => string
@@ -140,7 +129,7 @@ function Control(props: ControlProps): JSX.Element | null {
     onActiveChange,
     t,
     getSnapshot = () => EMPTY,
-    subscribe = () => () => {},
+    subscribe = NOOP_SUBSCRIBE,
     isSubagent = false,
     executeCommand = async () => {},
   } = props
@@ -154,14 +143,10 @@ function Control(props: ControlProps): JSX.Element | null {
   }, [onActiveChange])
 
   if (isSubagent) return null
+  const view = controlView(snapshot)
+  if (view === 'hidden') return null
 
-  const phase = snapshot.ultra?.run?.phase
-  const paused = snapshot.ultra?.paused === true
-  const runActive = phase === 'running' || phase === 'armed'
-  const showPause = snapshot.running || runActive
-  if (!showPause && !paused) return null
-
-  const label = paused
+  const label = view === 'play'
     ? (t?.('resume') ?? en.resume)
     : (t?.('pause') ?? en.pause)
   const disabled = locked || pending
@@ -171,7 +156,7 @@ function Control(props: ControlProps): JSX.Element | null {
     setPending(true)
     setError(undefined)
     try {
-      await executeCommand(paused ? '/resume' : '/pause')
+      await executeCommand(view === 'play' ? '/resume' : '/pause')
     } catch (cause: unknown) {
       setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
@@ -202,7 +187,7 @@ function Control(props: ControlProps): JSX.Element | null {
           opacity: disabled ? 0.5 : 1,
         }}
       >
-        {paused ? <PlayIcon /> : <PauseIcon />}
+        {view === 'play' ? <PlayIcon /> : <PauseIcon />}
       </button>
       {error === undefined ? null : (
         <span role="status" style={{ fontSize: 11, color: 'var(--dsw-alias-state-error-primary)' }}>

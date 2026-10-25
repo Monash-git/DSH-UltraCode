@@ -38,7 +38,6 @@ export interface RunState {
   reason?: string
   noProgressDigest?: string
   noProgressCount: number
-  playbookInjected: boolean
 }
 
 /** One todo item as written by the todo tool. */
@@ -88,7 +87,6 @@ export function createRunState(
     startedAt: now,
     updatedAt: now,
     noProgressCount: 0,
-    playbookInjected: false,
   }
 }
 
@@ -105,7 +103,6 @@ export function fromRunEvent(event: AutopilotRunEvent, config: ResolvedConfig): 
     updatedAt: event.updatedAt,
     ...event.reason === undefined ? {} : { reason: event.reason },
     noProgressCount: 0,
-    playbookInjected: true,
   }
 }
 
@@ -146,64 +143,49 @@ export function appendPauseEvent(agent: SessionCarrier, event: UltracodePauseEve
 
 /** Read the newest run event from a session snapshot. */
 export function latestRunEvent(events: readonly SessionEvent[]): AutopilotRunEvent | undefined {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index]
-    if (event !== undefined && event.type === 'autopilot/run') return event.data
-  }
-  return undefined
+  const event = lastEvent(events, candidate => candidate.type === 'autopilot/run')
+  return event?.type === 'autopilot/run' ? event.data : undefined
 }
 
 /** Read the newest mode event from a session snapshot. */
 export function latestModeEvent(events: readonly SessionEvent[]): UltracodeModeEvent | undefined {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index]
-    if (event !== undefined && event.type === 'ultracode/mode') return event.data
-  }
-  return undefined
+  const event = lastEvent(events, candidate => candidate.type === 'ultracode/mode')
+  return event?.type === 'ultracode/mode' ? event.data : undefined
 }
 
 /** Read the newest pause event from a session snapshot. */
 export function latestPauseEvent(events: readonly SessionEvent[]): UltracodePauseEvent | undefined {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index]
-    if (event !== undefined && event.type === 'ultracode/pause') return event.data
-  }
-  return undefined
+  const event = lastEvent(events, candidate => candidate.type === 'ultracode/pause')
+  return event?.type === 'ultracode/pause' ? event.data : undefined
 }
 
 /** Read the newest model selection event. */
 export function latestModelSelection(events: readonly SessionEvent[]): ModelSelection | undefined {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index]
-    if (event === undefined || (event.type as string) !== 'model/selection') continue
-    const data = event.data as {
-      provider?: unknown
-      model?: unknown
-      reasoningEffort?: unknown
-    }
-    if (typeof data.provider !== 'string' || typeof data.model !== 'string') continue
-    return {
-      provider: data.provider,
-      model: data.model,
-      ...typeof data.reasoningEffort === 'string' ? { reasoningEffort: data.reasoningEffort } : {},
-    }
+  const event = lastEvent(events, candidate => (candidate.type as string) === 'model/selection')
+  if (event === undefined) return undefined
+  const data = event.data as {
+    provider?: unknown
+    model?: unknown
+    reasoningEffort?: unknown
   }
-  return undefined
+  if (typeof data.provider !== 'string' || typeof data.model !== 'string') return undefined
+  return {
+    provider: data.provider,
+    model: data.model,
+    ...typeof data.reasoningEffort === 'string' ? { reasoningEffort: data.reasoningEffort } : {},
+  }
 }
 
 /** Read the newest durable turn closer. */
 export function latestTurnEnd(events: readonly SessionEvent[]): TurnEndInfo | undefined {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index]
-    if (event === undefined || event.type !== 'turn/end') continue
-    const reason = (event.data.reason as { kind?: unknown }).kind
-    return {
-      turn: event.data.turn,
-      reason: typeof reason === 'string' ? reason : 'unknown',
-      seq: event.seq,
-    }
+  const event = lastEvent(events, candidate => candidate.type === 'turn/end')
+  if (event?.type !== 'turn/end') return undefined
+  const reason = (event.data.reason as { kind?: unknown }).kind
+  return {
+    turn: event.data.turn,
+    reason: typeof reason === 'string' ? reason : 'unknown',
+    seq: event.seq,
   }
-  return undefined
 }
 
 /** The currently open turn number, or 0 when the log is balanced. */
@@ -232,21 +214,16 @@ export function isUnfinishedPhase(phase: AutopilotPhase): boolean {
     || phase === 'paused_resume'
 }
 
-/** Whether the inbox holds any pending user work (queue or steering). */
+/** Whether the inbox holds pending human work (queue or steering). */
 export function inboxHasUserWork(agent: InboxCarrier): boolean {
-  return agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0
+  const isHuman = (message: UserMessage): boolean => message.source.kind === 'user'
+  return agent.inbox.nextTurn.some(isHuman) || agent.inbox.nextStep.some(isHuman)
 }
 
 /** Read the newest whole todo list, or undefined when the todo tool never wrote one. */
 export function latestTodos(agent: SessionCarrier): TodoItem[] | undefined {
-  const events = agent.session.snapshotEvents()
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index]
-    if (event === undefined) continue
-    const todos = todoItemsOf(event)
-    if (todos !== undefined) return todos
-  }
-  return undefined
+  const event = lastEvent(agent.session.snapshotEvents(), candidate => todoItemsOf(candidate) !== undefined)
+  return event === undefined ? undefined : todoItemsOf(event)
 }
 
 /** Compact todo summary for a continuation nudge. */
@@ -260,17 +237,24 @@ export function todoSummary(agent: SessionCarrier): string {
 
 /** The newest assistant message's text, or an empty string. */
 export function latestAssistantText(agent: SessionCarrier): string {
-  const events = agent.session.snapshotEvents()
+  const event = lastEvent(agent.session.snapshotEvents(), candidate => candidate.type === 'assistant/message')
+  if (event?.type !== 'assistant/message') return ''
+  const parts: string[] = []
+  for (const block of event.data.message.content) {
+    if (block.type === 'text') parts.push(block.text)
+  }
+  return parts.join('\n')
+}
+
+function lastEvent(
+  events: readonly SessionEvent[],
+  predicate: (event: SessionEvent) => boolean,
+): SessionEvent | undefined {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
-    if (event === undefined || event.type !== 'assistant/message') continue
-    const parts: string[] = []
-    for (const block of event.data.message.content) {
-      if (block.type === 'text') parts.push(block.text)
-    }
-    return parts.join('\n')
+    if (event !== undefined && predicate(event)) return event
   }
-  return ''
+  return undefined
 }
 
 /** Whether the newest assistant message ends with a question mark. */

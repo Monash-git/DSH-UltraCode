@@ -36,6 +36,14 @@ interface LlmLike {
   stream(options: LlmCallConfig & { readonly messages: readonly unknown[] }): AsyncIterable<StreamChunk>
 }
 
+/** Install the decoration once the optional LLM service is active. */
+export function registerUltraEffort(ctx: Context): void {
+  ctx.inject(['llm'], scoped => {
+    const restore = installUltraEffort(scoped)
+    scoped.effect(() => restore)
+  })
+}
+
 /** Install the Ultra effort decoration; returns a disposer that restores the service. */
 export function installUltraEffort(ctx: Context): () => void {
   const llm = ctx.get('llm') as unknown as LlmLike | undefined
