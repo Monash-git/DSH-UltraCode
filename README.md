@@ -103,8 +103,7 @@ the new direction instead of dropping them. Holds survive a hot reload and a
 process restart; a restored pause always shows Play and never resumes itself.
 When a pause is restored after a process restart, its manifest says that the
 recorded background jobs did not survive and must be restarted from the saved
-plan or checkpoint (stopping and restarting those jobs belongs to the
-workflow/bash pause ticket).
+plan or checkpoint.
 
 Pause is root-mediated for local subagents. The root writes a durable pause
 manifest and sends each live descendant a host control message. At the child's
