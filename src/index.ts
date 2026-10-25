@@ -136,7 +136,9 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
         || restored.phase === 'waiting_user'
         || restored.phase === 'paused_user'
         || restored.phase === 'paused_resume')) {
-      markRunWaiting(restored)
+      // Start the exclusion at the durable record, not at reload: the whole
+      // waiting or paused span belongs outside the active-time budget.
+      markRunWaiting(restored, restored.updatedAt)
     }
     if (live) pause.hydrate(agent)
     else pause.onCreated(agent)
