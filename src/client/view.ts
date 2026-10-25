@@ -6,6 +6,13 @@ import en from '../../locale/en.json' with { type: 'json' }
 export interface UltraView {
   readonly paused?: boolean
   readonly reason?: string | null
+  readonly pauseStatus?: {
+    readonly phase?: string
+    readonly acknowledged?: number
+    readonly total?: number
+    readonly forced?: number
+    readonly warning?: string
+  } | null
   readonly run?: { readonly phase?: string } | null
 }
 
@@ -27,12 +34,23 @@ export interface PrimaryOwnerState {
   readonly stopLive: boolean
 }
 
+/** Root pause progress folded from the durable manifest. */
+export interface PauseProgress {
+  readonly phase?: string
+  readonly acknowledged?: number
+  readonly total?: number
+  readonly forced?: number
+  readonly warning?: string
+}
+
 /** Everything the primary action needs: owner props plus projections and command state. */
 export interface PrimaryState extends PrimaryOwnerState {
   readonly paused: boolean
   readonly phase: string | undefined
   /** A pause/resume command is in flight. */
   readonly pending: boolean
+  /** Pausing/paused child acknowledgment progress, when the Host records one. */
+  readonly pause?: PauseProgress
 }
 
 export type PrimaryKind = 'default' | 'pause' | 'play'
@@ -45,6 +63,8 @@ export interface PrimaryView {
   /** The run is idle only because an owned background job is live. */
   readonly waitingOnJob: boolean
   readonly label: PrimaryLabelKey | undefined
+  /** Pausing progress or forced-stop facts for the label. */
+  readonly progress?: PauseProgress
 }
 
 const DEFAULT_VIEW: PrimaryView = Object.freeze({
@@ -69,18 +89,30 @@ const ACTIVE_RUN_PHASES = new Set(['armed', 'running', 'waiting_job'])
 export function primaryView(state: PrimaryState): PrimaryView {
   if (state.subagent || state.locked) return DEFAULT_VIEW
   if (!state.empty || state.machineBusy || state.uploadsPending) return DEFAULT_VIEW
+  const progress = state.pause
   if (state.paused) {
-    return { kind: 'play', disabled: state.pending, waitingOnJob: false, label: 'resume' }
+    if (progress?.phase === 'pausing') {
+      return { kind: 'pause', disabled: true, waitingOnJob: false, label: 'pausing', progress }
+    }
+    return {
+      kind: 'play',
+      disabled: state.pending || progress?.phase === 'resuming',
+      waitingOnJob: false,
+      label: 'resume',
+      ...progress === undefined ? {} : { progress },
+    }
   }
   const activePhase = state.phase !== undefined && ACTIVE_RUN_PHASES.has(state.phase)
   if (!state.running && !activePhase) return DEFAULT_VIEW
+  const pausing = state.pending || progress?.phase === 'pausing'
   return {
     kind: 'pause',
     // A running session without a live Stop cannot service a pause either.
     // Waiting-on-job Pause does not depend on the default Stop.
-    disabled: state.pending || (state.running && !state.stopLive),
+    disabled: pausing || (state.running && !state.stopLive),
     waitingOnJob: state.phase === 'waiting_job',
-    label: state.pending ? 'pausing' : 'pause',
+    label: pausing ? 'pausing' : 'pause',
+    ...progress === undefined ? {} : { progress },
   }
 }
 
@@ -100,11 +132,30 @@ const FALLBACK_LABEL: Readonly<Record<PrimaryLabelKey, string>> = {
 /** Resolve a primary view to its accessible label/tooltip. */
 export function primaryText(view: PrimaryView, t?: (key: string) => string): PrimaryText {
   if (view.label === undefined) return {}
-  const label = t?.(view.label) ?? FALLBACK_LABEL[view.label]
-  if (!view.waitingOnJob) return { label, title: label }
-  const waiting = t?.('waitingJob') ?? en.waitingJob
-  const title = `${label} — ${waiting}`
-  return { label: title, title, status: waiting }
+  const lookup = (key: keyof typeof en): string => t?.(key) ?? en[key]
+  let label = t?.(view.label) ?? FALLBACK_LABEL[view.label]
+  if (view.label === 'pausing' && view.progress !== undefined && (view.progress.total ?? 0) > 0) {
+    label = format(lookup('pausingProgress'), {
+      acknowledged: view.progress.acknowledged ?? 0,
+      total: view.progress.total ?? 0,
+    })
+  }
+  if (view.waitingOnJob) {
+    const waiting = lookup('waitingJob')
+    const title = `${label} — ${waiting}`
+    return { label: title, title, status: waiting }
+  }
+  if (view.kind === 'play' && (view.progress?.forced ?? 0) > 0) {
+    const forced = format(lookup('pausedForced'), { forced: view.progress?.forced ?? 0 })
+    const title = `${label} — ${forced}`
+    return { label: title, title, status: forced }
+  }
+  return { label, title: label }
+}
+
+/** Substitute `{name}` placeholders in one localized template. */
+function format(template: string, values: Readonly<Record<string, string | number>>): string {
+  return template.replace(/\{(\w+)\}/g, (_match, key: string) => String(values[key] ?? ''))
 }
 
 /** The host command that implements one owned primary action. */

@@ -24,6 +24,7 @@ function owner(over: Partial<PrimaryState> = {}): PrimaryState {
     paused: false,
     phase: undefined,
     pending: false,
+    pause: undefined,
     ...over,
   }
 }
@@ -175,6 +176,49 @@ describe('primary composer action presentation', () => {
   it('announces pause progress while the command is in flight', () => {
     const view = primaryView(owner({ running: true, stopLive: true, pending: true }))
     expect(primaryText(view, translate(en))).toEqual({ label: 'Pausing…', title: 'Pausing…' })
+  })
+
+  it('shows acknowledged/total child progress while pausing', () => {
+    const state = owner({
+      paused: true,
+      pause: { phase: 'pausing', acknowledged: 1, total: 3, forced: 0 },
+    })
+    const view = primaryView(state)
+    expect(view).toMatchObject({ kind: 'pause', disabled: true, label: 'pausing' })
+    expect(primaryText(view, translate(en))).toEqual({
+      label: 'Pausing… (1/3 acknowledged)',
+      title: 'Pausing… (1/3 acknowledged)',
+    })
+    expect(primaryText(view, translate(zh))).toEqual({
+      label: '正在暂停…（1/3 已确认）',
+      title: '正在暂停…（1/3 已确认）',
+    })
+  })
+
+  it('keeps Play enabled after a forced child and labels the forced stop', () => {
+    const state = owner({
+      paused: true,
+      pause: { phase: 'paused', acknowledged: 2, total: 3, forced: 1 },
+    })
+    const view = primaryView(state)
+    expect(view).toMatchObject({ kind: 'play', disabled: false, label: 'resume' })
+    expect(primaryText(view, translate(en))).toEqual({
+      label: 'Resume — Paused — 1 stopped after timeout',
+      title: 'Resume — Paused — 1 stopped after timeout',
+      status: 'Paused — 1 stopped after timeout',
+    })
+    expect(primaryText(view, translate(zh))).toEqual({
+      label: '继续 — 已暂停 — 1 个已超时强制停止',
+      title: '继续 — 已暂停 — 1 个已超时强制停止',
+      status: '已暂停 — 1 个已超时强制停止',
+    })
+  })
+
+  it('disables Play while the resume command is releasing children', () => {
+    expect(primaryView(owner({
+      paused: true,
+      pause: { phase: 'resuming', acknowledged: 3, total: 3, forced: 0 },
+    }))).toMatchObject({ kind: 'play', disabled: true, label: 'resume' })
   })
 
   it('has no label for the default action', () => {

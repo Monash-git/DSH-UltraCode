@@ -4,5 +4,7 @@
   "resume": "继续",
   "paused": "已暂停",
   "running": "运行中",
-  "waitingJob": "正在等待后台任务"
+  "waitingJob": "正在等待后台任务",
+  "pausingProgress": "正在暂停…（{acknowledged}/{total} 已确认）",
+  "pausedForced": "已暂停 — {forced} 个已超时强制停止"
 }

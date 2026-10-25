@@ -152,13 +152,30 @@ describe('/autopilot command', () => {
 })
 
 describe('/pause and /resume commands', () => {
-  it('delegate to the pause controller and re-anchor Ultra on resume', () => {
+  it('delegate to the pause controller and re-anchor Ultra on resume', async () => {
     const { agent } = fakeAgent()
     const { context, pause, ultra } = fakeContext()
     expect(handlePauseCommand(agent, context).kind).toBe('success')
-    expect(handleResumeCommand(agent, context).kind).toBe('success')
+    expect((await handleResumeCommand(agent, context)).kind).toBe('success')
     expect(pause.pause).toHaveBeenCalledWith(agent)
     expect(pause.resume).toHaveBeenCalledWith(agent)
+    expect(ultra.requestFullPlaybook).toHaveBeenCalledWith(agent)
+  })
+
+  it('surfaces a child restart warning from the asynchronous resume path', async () => {
+    const { agent } = fakeAgent()
+    const { context, ultra } = fakeContext()
+    const pause = {
+      resume: vi.fn(),
+      resumeAsync: vi.fn(async () => ({
+        ok: true,
+        text: 'Session resumed. Subagent child-1 could not be resumed; restart it from its checkpoint.',
+      })),
+    } as unknown as CommandContext['pause']
+    const result = await handleResumeCommand(agent, { ...context, pause })
+    expect(result.kind).toBe('success')
+    if (result.kind === 'success') expect(result.text).toContain('restart it from its checkpoint')
+    expect(pause.resume).not.toHaveBeenCalled()
     expect(ultra.requestFullPlaybook).toHaveBeenCalledWith(agent)
   })
 })

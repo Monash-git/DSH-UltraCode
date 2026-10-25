@@ -7,6 +7,8 @@ import { maxDurationFor, maxRoundsFor, type ResolvedConfig } from './config.js'
 import type {
   AutopilotPhase,
   AutopilotRunEvent,
+  PauseCheckpointEvent,
+  PauseManifestEvent,
   ProjectionRun,
   UltracodeModeEvent,
   UltracodePauseEvent,
@@ -162,6 +164,8 @@ export function activeElapsedMs(run: RunState, now = Date.now()): number {
 export const RUN_RECORD = 'plugin:ultracode/run' as const
 export const MODE_RECORD = 'plugin:ultracode/mode' as const
 export const PAUSE_RECORD = 'plugin:ultracode/pause' as const
+export const PAUSE_MANIFEST_RECORD = 'plugin:ultracode/pause-manifest' as const
+export const CHECKPOINT_RECORD = 'plugin:ultracode/checkpoint' as const
 
 /** Append the current run state as an ignorable plugin record. */
 export function appendRunEvent(agent: SessionCarrier, run: RunState): void {
@@ -198,6 +202,16 @@ export function appendPauseEvent(agent: SessionCarrier, event: UltracodePauseEve
   appendPluginRecord(agent.session, PAUSE_RECORD, event)
 }
 
+/** Append the whole root-owned pause manifest as an ignorable plugin record. */
+export function appendPauseManifest(agent: SessionCarrier, event: PauseManifestEvent): void {
+  appendPluginRecord(agent.session, PAUSE_MANIFEST_RECORD, event)
+}
+
+/** Append one child checkpoint and return its durable sequence number. */
+export function appendCheckpointEvent(agent: SessionCarrier, event: PauseCheckpointEvent): number {
+  return appendPluginRecord(agent.session, CHECKPOINT_RECORD, event)
+}
+
 /** Read the newest run record from a session snapshot. */
 export function latestRunEvent(events: readonly SessionEvent[]): AutopilotRunEvent | undefined {
   const event = lastEvent(events, candidate => recordData<AutopilotRunEvent>(candidate, RUN_RECORD, 'autopilot/run') !== undefined)
@@ -223,6 +237,58 @@ export function latestPauseInfo(
 /** Read the newest pause record from a session snapshot. */
 export function latestPauseEvent(events: readonly SessionEvent[]): UltracodePauseEvent | undefined {
   return latestPauseInfo(events)?.data
+}
+
+/** Read the newest root pause manifest from a session snapshot. */
+export function latestPauseManifest(events: readonly SessionEvent[]): PauseManifestEvent | undefined {
+  const event = lastEvent(events, candidate =>
+    recordData<PauseManifestEvent>(candidate, PAUSE_MANIFEST_RECORD) !== undefined)
+  return event === undefined
+    ? undefined
+    : recordData<PauseManifestEvent>(event, PAUSE_MANIFEST_RECORD)
+}
+
+/** Read the newest checkpoint written into a child session. */
+export function latestCheckpointEvent(events: readonly SessionEvent[]): PauseCheckpointEvent | undefined {
+  const event = lastEvent(events, candidate =>
+    recordData<PauseCheckpointEvent>(candidate, CHECKPOINT_RECORD) !== undefined)
+  return event === undefined
+    ? undefined
+    : recordData<PauseCheckpointEvent>(event, CHECKPOINT_RECORD)
+}
+
+/** One durable direct-child catalog row. */
+export interface CatalogChildRow {
+  readonly id: string
+  readonly mode: string
+  readonly label?: string
+}
+
+/** Fold the newest whole child catalog from `subagent/catalog` events. */
+export function catalogChildren(events: readonly SessionEvent[]): Map<string, CatalogChildRow> {
+  const result = new Map<string, CatalogChildRow>()
+  for (const event of events) {
+    if ((event.type as string) !== 'subagent/catalog') continue
+    const data = event.data as { childId?: unknown; mode?: unknown; label?: unknown }
+    if (typeof data.childId !== 'string' || typeof data.mode !== 'string') continue
+    result.set(data.childId, {
+      id: data.childId,
+      mode: data.mode,
+      ...typeof data.label === 'string' ? { label: data.label } : {},
+    })
+  }
+  return result
+}
+
+/** Child ids started by the model-facing workflow tool in this session. */
+export function workflowChildIds(events: readonly SessionEvent[]): Set<string> {
+  const result = new Set<string>()
+  for (const event of events) {
+    if ((event.type as string) !== 'tool-workflow/agent-start') continue
+    const data = event.data as { childId?: unknown }
+    if (typeof data.childId === 'string') result.add(data.childId)
+  }
+  return result
 }
 
 function recordData<T>(event: SessionEvent, recordType: string, legacyType?: string): T | undefined {

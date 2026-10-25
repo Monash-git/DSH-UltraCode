@@ -17,6 +17,8 @@ export interface PluginConfig {
   readonly ultraReminder?: boolean
   /** Fan-out guidance written into the playbook; the host cap still applies. */
   readonly fanoutLimit?: number
+  /** Bounded wait for local child pause acknowledgments before forcing a stop. */
+  readonly pauseTimeoutMs?: number
 }
 
 export interface ResolvedConfig {
@@ -27,12 +29,14 @@ export interface ResolvedConfig {
   readonly ultraEffort: boolean
   readonly ultraReminder: boolean
   readonly fanoutLimit: number
+  readonly pauseTimeoutMs: number
 }
 
 const DEFAULT_MAX_ROUNDS = 120
 const DEFAULT_MAX_DURATION_MS = 60 * 60 * 1000
 const DEFAULT_NO_PROGRESS_ROUNDS = 3
 const DEFAULT_FANOUT_LIMIT = 8
+const DEFAULT_PAUSE_TIMEOUT_MS = 60_000
 const SHORT_SKILL_DURATION_MS = 30 * 60 * 1000
 
 /** Resolve and validate the plugin configuration. */
@@ -49,6 +53,7 @@ export function resolveConfig(config: PluginConfig = {}): ResolvedConfig {
     ultraEffort: config.ultraEffort ?? true,
     ultraReminder: config.ultraReminder ?? true,
     fanoutLimit: positiveInteger('fanoutLimit', config.fanoutLimit ?? DEFAULT_FANOUT_LIMIT),
+    pauseTimeoutMs: positiveInteger('pauseTimeoutMs', config.pauseTimeoutMs ?? DEFAULT_PAUSE_TIMEOUT_MS),
   }
 }
 

@@ -4,9 +4,11 @@ import type { Context } from '@deepseek-ai/cordis'
 import { pluginRecordOf, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-projection'
 import { z } from 'zod'
-import { MODE_RECORD, PAUSE_RECORD, RUN_RECORD } from './state.js'
+import { MODE_RECORD, PAUSE_MANIFEST_RECORD, PAUSE_RECORD, RUN_RECORD } from './state.js'
 import type {
   AutopilotRunEvent,
+  PauseManifestEvent,
+  PauseStatusView,
   ProjectionRun,
   UltracodeModeEvent,
   UltracodePauseEvent,
@@ -30,8 +32,17 @@ const runSchema = z.object({
   maxRounds: z.number(),
 }).nullable()
 
+const pauseStatusSchema = z.object({
+  phase: z.enum(['pausing', 'paused', 'resuming']),
+  acknowledged: z.number(),
+  total: z.number(),
+  forced: z.number(),
+  warning: z.string().optional(),
+}).nullable()
+
 const stateSchema = z.object({
   pause: pauseSchema,
+  pauseStatus: pauseStatusSchema.default(null),
   run: runSchema,
   mode: z.enum(['on', 'off']),
 })
@@ -39,9 +50,29 @@ const stateSchema = z.object({
 const viewSchema = z.object({
   paused: z.boolean(),
   reason: z.string().nullable(),
+  pauseStatus: pauseStatusSchema,
   run: runSchema,
   mode: z.enum(['on', 'off']),
 })
+
+/** Fold one manifest into the compact pausing/paused progress the UI shows. */
+function pauseStatusOf(data: PauseManifestEvent): PauseStatusView | null {
+  if (data.phase !== 'pausing' && data.phase !== 'paused' && data.phase !== 'resuming') return null
+  const total = data.children.length
+  const acknowledged = data.children.filter(child =>
+    child.state === 'parked'
+    || child.state === 'idle'
+    || child.state === 'resumed'
+    || child.state === 'cold-resumed').length
+  const forced = data.children.filter(child => child.forced === true || child.state === 'forced').length
+  return {
+    phase: data.phase,
+    acknowledged,
+    total,
+    forced,
+    ...data.warning === undefined ? {} : { warning: data.warning },
+  }
+}
 
 export const ultracodeProjectionDefinition = {
   key: 'ultracode' as const,
@@ -49,6 +80,7 @@ export const ultracodeProjectionDefinition = {
   stateVersion: 1,
   init: (): UltracodeProjectionState => ({
     pause: null,
+    pauseStatus: null,
     run: null,
     mode: 'off',
   }),
@@ -78,6 +110,10 @@ export const ultracodeProjectionDefinition = {
       }
       return { ...state, run }
     }
+    if (type === PAUSE_MANIFEST_RECORD) {
+      const data = (record?.data ?? event.data) as PauseManifestEvent
+      return { ...state, pauseStatus: pauseStatusOf(data) }
+    }
     if (type === MODE_RECORD || type === 'ultracode/mode') {
       const data = (record?.data ?? event.data) as UltracodeModeEvent
       const mode = data.enabled ? 'on' as const : 'off' as const
@@ -91,6 +127,7 @@ export const ultracodeProjectionDefinition = {
     view: (state: UltracodeProjectionState): UltracodeProjectionView => ({
       paused: state.pause?.paused === true,
       reason: state.pause?.reason ?? null,
+      pauseStatus: state.pauseStatus ?? null,
       run: state.run,
       mode: state.mode,
     }),

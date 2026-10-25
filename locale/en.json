@@ -4,5 +4,7 @@
   "resume": "Resume",
   "paused": "Paused",
   "running": "Running",
-  "waitingJob": "Waiting for background job"
+  "waitingJob": "Waiting for background job",
+  "pausingProgress": "Pausing… ({acknowledged}/{total} acknowledged)",
+  "pausedForced": "Paused — {forced} stopped after timeout"
 }

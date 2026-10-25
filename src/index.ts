@@ -25,6 +25,12 @@ import { findSkillInvocation, hasUserMessage } from './detect.js'
 import { registerUltraEffort } from './effort.js'
 import { ObservationController } from './observation.js'
 import { PauseController } from './pause.js'
+import {
+  PauseCoordinator,
+  type LiveAgentRegistryLike,
+  type SessionStoreLike,
+  type SubagentServiceLike,
+} from './pause-coordinator.js'
 import { registerUltracodeProjection } from './projection.js'
 import {
   autopilotBanner,
@@ -66,7 +72,22 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
   const settings = resolveConfig(config)
   const runs = new Map<string, RunState>()
   const hydrated = new Set<string>()
-  const pause = new PauseController(settings, runs)
+  const jobs = (): JobRegistryLike | undefined =>
+    (ctx as unknown as { get(name: string): unknown }).get('jobs') as JobRegistryLike | undefined
+  const coordinator = new PauseCoordinator({
+    timeoutMs: settings.pauseTimeoutMs,
+    agents: () => (ctx as unknown as { get(name: string): unknown }).get('agents') as
+      | LiveAgentRegistryLike
+      | undefined,
+    subagents: () => (ctx as unknown as { get(name: string): unknown }).get('subagents') as
+      | SubagentServiceLike
+      | undefined,
+    sessions: () => (ctx as unknown as { get(name: string): unknown }).get('sessions') as
+      | SessionStoreLike
+      | undefined,
+    jobs,
+  })
+  const pause = new PauseController(settings, runs, coordinator)
   const defaultSelection = (): { provider: string; model: string; reasoningEffort?: string } | undefined => {
     const service = (ctx as unknown as {
       get(name: string): unknown
@@ -77,8 +98,6 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
   }
   const ultra = new UltraModeController(settings, defaultSelection)
   const taskState = new TaskStateController()
-  const jobs = (): JobRegistryLike | undefined =>
-    (ctx as unknown as { get(name: string): unknown }).get('jobs') as JobRegistryLike | undefined
   const observation = new ObservationController()
   const selectMax = (agent: Agent): void => {
     const selection = latestModelSelection(agent.session.snapshotEvents())
@@ -159,9 +178,11 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
   // Disposal is a reload or an uninstall, never a reason to mutate a session.
   // A true shutdown ends the live turn with the process; the durable run
   // record is restored as `paused_resume` the next time the session loads.
+  // Parked child turns are released so an unload cannot leave them hanging.
   ctx.effect(() => () => {
     runs.clear()
     hydrated.clear()
+    coordinator.dispose()
   })
 
   if (settings.ultraEffort) registerUltraEffort(ctx)
@@ -199,6 +220,11 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
   ctx.on('agent/error', ({ agent, turn }: { agent: Agent; turn: number }) => {
     pause.onError(agent, turn)
   })
+
+  // Park gate: runs for every agent. A child with a root pause request is
+  // checkpointed, acknowledged, and held at this pre-step boundary without
+  // ending its turn. The host pause control is stripped for every model.
+  ctx.on('agent/pre-step', async (payload, next) => coordinator.onPreStep(payload, next))
 
   // The listener calls next() first, so the skill body and the catalog have
   // already been appended; our additions are always last.

@@ -96,6 +96,7 @@ function PrimaryAction(props: PrimaryActionProps): ReactNode {
   const projection = useProjection('ultracode', value => value as UltraView | undefined)
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
+  const status = projection?.pauseStatus
   const view = primaryView({
     empty,
     running,
@@ -107,6 +108,15 @@ function PrimaryAction(props: PrimaryActionProps): ReactNode {
     paused: projection?.paused === true,
     phase: projection?.run?.phase,
     pending,
+    pause: status === undefined || status === null
+      ? undefined
+      : {
+          phase: status.phase,
+          acknowledged: status.acknowledged,
+          total: status.total,
+          forced: status.forced,
+          warning: status.warning,
+        },
   })
 
   // Declining returns the exact shipped node, so Send/Stop/Steer and the

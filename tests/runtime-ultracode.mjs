@@ -345,6 +345,31 @@ function pauseRecords(agent) {
     .filter(Boolean)
 }
 
+function pauseManifests(agent) {
+  return agent.session.snapshotEvents()
+    .map(event => pluginData(event, 'plugin:ultracode/pause-manifest'))
+    .filter(Boolean)
+}
+
+function latestPauseManifest(agent) {
+  return pauseManifests(agent).at(-1)
+}
+
+function checkpoints(agent) {
+  return agent.session.snapshotEvents()
+    .map(event => pluginData(event, 'plugin:ultracode/checkpoint'))
+    .filter(Boolean)
+}
+
+async function waitForCondition(predicate, label, timeout = 20_000) {
+  const deadline = Date.now() + timeout
+  while (Date.now() < deadline) {
+    if (predicate()) return
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  throw new Error(`${label} timed out`)
+}
+
 function latestRun(agent) {
   return agent.session.snapshotEvents()
     .map(event => pluginData(event, 'plugin:ultracode/run'))
@@ -1026,6 +1051,81 @@ async function scenarioAutopilotPause() {
   }
 }
 
+async function scenarioLocalSubagentPause() {
+  const h = await createHarness([
+    toolCallResponse('call-child-wait', 'wait_tool', {}, 'Child working.'),
+    textResponse('Child resumed after the pause.'),
+    textResponse('Root resumed after the pause.'),
+  ], { waitTool: true })
+  let childHandle
+  try {
+    childHandle = await h.ctx.agents.create({
+      sessionId: SessionId('ultracode-pause-child-1'),
+      parentAgent: h.agent,
+      meta: {
+        cwd: tempDir,
+        parentSession: h.agent.session.id,
+        origin: 'subagent',
+        delegationDepth: 1,
+      },
+      agentOptions: { provider: 'deepseek-official', model: 'mock' },
+      setup: async () => {},
+    })
+    const child = childHandle.agent
+    await new Promise(resolve => setTimeout(resolve, 10))
+    child.followup(user('child task'))
+    await withTimeout(h.wait.started, 'local pause child wait start')
+
+    const paused = await h.ctx.commands.execute(h.agent, '/pause', [], new AbortController().signal)
+    assert.ok(paused, 'the pause command should be registered')
+    h.wait.release()
+    await waitForCondition(
+      () => latestPauseManifest(h.agent)?.phase === 'paused',
+      'local pause manifest paused',
+    )
+
+    const manifest = latestPauseManifest(h.agent)
+    assert.equal(manifest.children.length, 1, 'the root should enumerate its live local child')
+    assert.equal(manifest.children[0].id, String(child.session.id))
+    assert.equal(manifest.children[0].state, 'parked', 'the acknowledging child should be parked')
+    assert.equal(manifest.forced, 0, 'an acknowledging child is not forced')
+    assert.equal(child.status, 'running', 'a parked child keeps its turn open')
+    assert.equal(h.adapter.requests.length, 1, 'parking must not spend a model request')
+    assert.ok(
+      checkpoints(child).some(checkpoint =>
+        checkpoint.pauseId === manifest.pauseId && checkpoint.forced === false),
+      'the child should record a durable checkpoint',
+    )
+    assert.ok(
+      !JSON.stringify(child.session.snapshotEvents()).includes('Ultra host pause'),
+      'the host pause control must not enter the child transcript',
+    )
+
+    const resumed = await h.ctx.commands.execute(h.agent, '/resume', [], new AbortController().signal)
+    assert.ok(resumed, 'the resume command should be registered')
+    await withTimeout(child.whenIdle(), 'local pause child resume')
+    await withTimeout(h.agent.whenIdle(), 'local pause root resume')
+    await waitForCondition(
+      () => latestPauseManifest(h.agent)?.phase === 'resumed',
+      'local pause manifest resumed',
+    )
+    assert.equal(latestPauseManifest(h.agent).children[0].state, 'resumed')
+    assert.equal(h.adapter.requests.length, 3, 'resume should add exactly the child and root turns')
+    assert.ok(
+      !h.adapter.requests.some(request => requestText(request).includes('Ultra host pause')),
+      'the hidden control must never reach a model request',
+    )
+    return {
+      scenario: 'local-subagent-pause',
+      requests: h.adapter.requests.length,
+      children: manifest.children.length,
+    }
+  } finally {
+    await childHandle?.dispose()
+    await h.handle.dispose()
+  }
+}
+
 async function scenarioRoundCap() {
   const h = await createHarness([
     textResponse('I will stop here.'),
@@ -1226,6 +1326,7 @@ for (const scenario of [
   scenarioSteer,
   scenarioPauseResume,
   scenarioAutopilotPause,
+  scenarioLocalSubagentPause,
   scenarioQuestion,
   scenarioTurnYield,
   scenarioWaitingJobUserMessage,

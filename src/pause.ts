@@ -6,9 +6,11 @@
  * user message; nothing rewrites history.
  */
 
+import { randomUUID } from 'node:crypto'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import type { ResolvedConfig } from './config.js'
+import type { PauseCoordinator } from './pause-coordinator.js'
 import { continuationNudge, genericResumeNudge } from './prompts.js'
 import {
   appendPauseEvent,
@@ -43,6 +45,7 @@ export class PauseController {
   constructor(
     private readonly config: ResolvedConfig,
     private readonly runs: Map<string, RunState>,
+    private readonly coordinator?: PauseCoordinator,
   ) {}
 
   /**
@@ -111,6 +114,9 @@ export class PauseController {
     if (!isRootAgent(agent) || !this.paused.has(sessionKey(agent))) return false
     if (!messages.some(message => message.source.kind === 'user')) return false
     this.clear(agent, 'cleared')
+    void this.coordinator?.release(agent, 'cancel').catch((error: unknown) => {
+      console.error('[dsh-ultracode] cancelling the child pause failed:', error)
+    })
     const run = this.runs.get(sessionKey(agent))
     if (run !== undefined && (run.phase === 'paused_user' || run.phase === 'paused_resume')) {
       run.phase = 'cancelled'
@@ -140,11 +146,44 @@ export class PauseController {
     if (agent.status === 'running') {
       agent.cancel({ kind: 'user' }, { keepInbox: true })
     }
+    if (this.coordinator !== undefined) {
+      // The command returns immediately; acknowledgment waits are bounded by
+      // the coordinator timeout and never hold the UI request open.
+      void this.coordinator.begin(agent, randomUUID()).catch((error: unknown) => {
+        console.error('[dsh-ultracode] root pause coordination failed:', error)
+      })
+      return { ok: true, text: 'Pausing session.' }
+    }
     return { ok: true, text: 'Session paused.' }
   }
 
   /** Resume a paused autopilot run or a generic interrupted turn. */
   resume(agent: Agent): PauseOutcome {
+    return this.resumeLocal(agent, false)
+  }
+
+  /**
+   * Resume and wait for child release, so Play can report a cold-resume
+   * failure. Used by the `/resume` command; the autopilot command keeps the
+   * non-blocking path.
+   */
+  async resumeAsync(agent: Agent): Promise<PauseOutcome> {
+    if (!isRootAgent(agent)) return { ok: false, text: 'Resume is only available to the root session.' }
+    let warnings: string[] = []
+    if (this.coordinator !== undefined) {
+      try {
+        const released = await this.coordinator.release(agent, 'resume')
+        warnings = [...released.warnings]
+      } catch (error: unknown) {
+        warnings = [`Child release failed: ${error instanceof Error ? error.message : String(error)}`]
+      }
+    }
+    const outcome = this.resumeLocal(agent, true)
+    if (!outcome.ok || warnings.length === 0) return outcome
+    return { ok: true, text: `${outcome.text} ${warnings.join(' ')}` }
+  }
+
+  private resumeLocal(agent: Agent, releasedChildren: boolean): PauseOutcome {
     if (!isRootAgent(agent)) return { ok: false, text: 'Resume is only available to the root session.' }
     const key = sessionKey(agent)
     const run = this.runs.get(key)
@@ -172,6 +211,7 @@ export class PauseController {
         run.reason = previous.reason
         return { ok: false, text: `Unable to resume the run: ${error instanceof Error ? error.message : String(error)}` }
       }
+      if (!releasedChildren) this.releaseChildren(agent)
       resumeRunActive(run)
       run.round = nextRound
       run.phase = 'running'
@@ -191,6 +231,7 @@ export class PauseController {
     } catch (error: unknown) {
       return { ok: false, text: `Unable to resume the session: ${error instanceof Error ? error.message : String(error)}` }
     }
+    if (!releasedChildren) this.releaseChildren(agent)
     if (run !== undefined) resumeRunActive(run)
     this.clear(agent, 'resumed')
     return { ok: true, text: 'Session resumed.' }
@@ -203,6 +244,9 @@ export class PauseController {
     if (agent.status === 'running') {
       agent.cancel({ kind: 'user' }, { keepInbox: true })
     }
+    void this.coordinator?.release(agent, 'cancel').catch((error: unknown) => {
+      console.error('[dsh-ultracode] cancelling the child pause failed:', error)
+    })
   }
 
   /** Consume the explicit-cancel flag for one turn. */
@@ -244,7 +288,10 @@ export class PauseController {
       return 'paused'
     }
     if (this.paused.has(key)) {
-      this.clear(agent, 'completed')
+      // A paused session never clears itself: an unrelated wake (job notice,
+      // child settlement) must not restart work. Play or a human message owns
+      // the transition; ticket 08 adds the wake hold.
+      return 'paused'
     }
     return 'none'
   }
@@ -259,6 +306,8 @@ export class PauseController {
     const key = sessionKey(agent)
     this.paused.delete(key)
     this.explicitCancel.delete(key)
+    this.coordinator?.abortChild(key)
+    this.coordinator?.disposeRoot(key)
   }
 
   /** Whether the session is currently paused. */
@@ -269,6 +318,13 @@ export class PauseController {
   /** The current paused reason, for status text. */
   reasonOf(agent: Agent): string | undefined {
     return this.paused.get(sessionKey(agent))?.reason
+  }
+
+  /** Release parked children without blocking the command result. */
+  private releaseChildren(agent: Agent): void {
+    void this.coordinator?.release(agent, 'resume').catch((error: unknown) => {
+      console.error('[dsh-ultracode] resuming paused children failed:', error)
+    })
   }
 
   private markPaused(agent: Agent, reason: PauseReason, turn: number): void {

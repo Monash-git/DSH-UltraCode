@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Added root-mediated pause for local subagents. Pause now writes a durable
+  manifest and sends each live descendant a host pre-step park control; the
+  child flushes its session, records a checkpoint, acknowledges, and keeps its
+  turn open without a model request. The root waits a bounded time for
+  acknowledgments, interrupts non-acknowledging children and marks them forced,
+  and shows acknowledged/total plus forced labels on the primary control. Play
+  releases parked children, warm-resumes resident stopped children, and
+  cold-resumes disposed children through `ctx.subagents`, warning when a child
+  must restart from its checkpoint. Workflow children are parked only through
+  the host gate (never sent a finish message); job ids are recorded for the
+  workflow/bash ticket. Sending text while paused cancels the pause and
+  releases parked work.
 - Replaced the activity-seat pause/play button with the primary composer
   action: with an empty draft, the main Send/Stop button becomes Pause while a
   root session runs or waits on a background job, and Play while paused. Text
