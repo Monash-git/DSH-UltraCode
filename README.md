@@ -97,19 +97,23 @@ Completion wakes are gated while paused. A background job notice, a subagent
 settlement, or any other non-human input claimed at a root `agent/pre-step` is
 captured verbatim as a durable `plugin:ultracode/wake-hold` record and the step
 is rejected, so the turn closes without a model request and no work starts.
-Play replays every unreleased hold into the resume batch and records a durable
-release. Text sent while paused cancels the pause and joins any held wakes to
-the new direction instead of dropping them. Holds survive a hot reload and a
-process restart; a restored pause always shows Play and never resumes itself.
-When a pause is restored after a process restart, its manifest says that the
-recorded background jobs did not survive and must be restarted from the saved
-plan or checkpoint.
+The guarantee is **no model request while paused**; DSH may still open a turn
+boundary for the wake before the plugin rejects it. Play replays every
+unreleased hold into the resume batch and records a durable release. Text sent
+while paused cancels the pause and joins any held wakes to the new direction
+instead of dropping them. Holds survive a hot reload and a process restart; a
+restored pause always shows Play and never resumes itself. When a pause is
+restored after a process restart, its manifest says that the recorded
+background jobs did not survive and must be restarted from the saved plan or
+checkpoint.
 
 Pause is root-mediated for local subagents. The root writes a durable pause
 manifest and sends each live descendant a host control message. At the child's
 next `agent/pre-step` the control is consumed before the model sees it, the
-child flushes its session, records a checkpoint, acknowledges, and parks with
-its turn open; no model request is made while parked. The primary control shows
+child flushes its session, records a checkpoint (task state, todos, last
+assistant text, and bounded artifact paths from `present` events),
+acknowledges, and parks with its turn open; no model request is made while
+parked. The primary control shows
 the acknowledged/total progress while pausing and marks forced stops. A child
 that does not acknowledge within the bounded timeout (60 seconds by default) is
 stopped through the existing interrupt path and marked forced in the manifest.
@@ -127,10 +131,11 @@ cannot be stopped is recorded as `stop-failed` with a visible warning and is
 never reported as paused or stopped; pause does not silently leave background
 work spending. A workflow run is captured with its original script (the saved
 plan), the job's output paths, the workspace, and every member child Session
-id. Play never claims a run-level resume: it sends the root a restart
-instruction that restarts workflow work from the saved plan/artifacts and
-re-runs a stopped bash command only if still needed. The primary control shows
-the restart warning, and `/resume` reports the same outcome.
+id. Play never claims a run-level resume: it sends the root a model-visible
+restart instruction that includes the bounded saved plan and captured artifact
+paths, restarts workflow work from them, and re-runs a stopped bash command
+only if still needed. The primary control shows the restart warning, and
+`/resume` reports the same outcome.
 
 The control is a native occupant of DSH's optional
 `conversation.input.primary` slot. It renders the shipped primary action
@@ -195,15 +200,20 @@ invariants with a mock adapter.
   its checkpoint.
 - The root wake gate also uses `agent/pre-step`: DSH opens the wake's turn
   boundary and claims the notice, then the plugin records the notice durably
-  and rejects the step before any model request. If the process crashes between
-  the claim and the hold flush, that notice can be lost; the session still
-  reopens paused. A crash after Play delivers a held notice but before its
-  release record is flushed can replay the notice once more. Neither case
-  starts work without Play.
+  and rejects the step before any model request. The achievable guarantee is
+  no model request while paused, not the absence of a turn boundary. If the
+  process crashes between the claim and the hold flush, that notice can be
+  lost; the session still reopens paused. A crash after Play delivers a held
+  notice but before its release record is flushed can replay the notice once
+  more. A settlement that lands in DSH's driver retirement window can still
+  inject its notice without opening a wake turn until the next user input;
+  that race belongs to DSH's agent loop. No case starts work without Play.
 - Pausing while a run is waiting on a background job keeps the run paused when
   the job settles; Play releases the held notice and continues the run. The
-  plugin cannot stop an in-flight tool, so a wake that was already claimed
-  inside a running tool chain is delivered by that turn rather than held.
+  plugin cannot stop an in-flight tool or a step that was already prepared
+  before the Pause click; that pre-pause step may still finish. The gate holds
+  every wake claimed after the pause, and no new model step starts while
+  paused.
 - The plugin detects a live job through the optional `ctx.jobs` service. If the
   composition omits it, turn yield simply does not trigger.
 - `session_status` reports the calling root session only. It does not read

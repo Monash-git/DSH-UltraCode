@@ -73,19 +73,15 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
   const settings = resolveConfig(config)
   const runs = new Map<string, RunState>()
   const hydrated = new Set<string>()
-  const jobs = (): JobRegistryLike | undefined =>
-    (ctx as unknown as { get(name: string): unknown }).get('jobs') as JobRegistryLike | undefined
-  const sessions = (): SessionStoreLike | undefined =>
-    (ctx as unknown as { get(name: string): unknown }).get('sessions') as SessionStoreLike | undefined
+  /** One typed accessor for every optional host service. */
+  const service = <T>(name: string): T | undefined => serviceOf<T>(ctx, name)
+  const jobs = (): JobRegistryLike | undefined => service<JobRegistryLike>('jobs')
+  const sessions = (): SessionStoreLike | undefined => service<SessionStoreLike>('sessions')
   const coordinator = new PauseCoordinator({
     timeoutMs: settings.pauseTimeoutMs,
     drainMs: settings.pauseDrainMs,
-    agents: () => (ctx as unknown as { get(name: string): unknown }).get('agents') as
-      | LiveAgentRegistryLike
-      | undefined,
-    subagents: () => (ctx as unknown as { get(name: string): unknown }).get('subagents') as
-      | SubagentServiceLike
-      | undefined,
+    agents: () => service<LiveAgentRegistryLike>('agents'),
+    subagents: () => service<SubagentServiceLike>('subagents'),
     sessions,
     jobs,
   })
@@ -103,12 +99,10 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
   })
   const pause = new PauseController(settings, runs, coordinator, wake)
   const defaultSelection = (): { provider: string; model: string; reasoningEffort?: string } | undefined => {
-    const service = (ctx as unknown as {
-      get(name: string): unknown
-    }).get('agentDefaultModel') as {
+    const model = service<{
       currentSelection(): { provider: string; model: string; reasoningEffort?: string }
-    } | undefined
-    return service?.currentSelection()
+    }>('agentDefaultModel')
+    return model?.currentSelection()
   }
   const ultra = new UltraModeController(settings, defaultSelection)
   const taskState = new TaskStateController()
@@ -125,14 +119,14 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
         reasoningEffort: 'max',
       })
     }
-    const controller = ctx.get('sessionController') as {
+    const controller = service<{
       selectModel(request: {
         sessionId: typeof agent.session.id
         provider: string
         model: string
         reasoningEffort: 'max'
       }): Promise<unknown>
-    } | undefined
+    }>('sessionController')
     if (controller === undefined) {
       fallback()
       return
@@ -183,9 +177,7 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
   }
 
   const restoreLiveAgents = (scope: Context): void => {
-    const agents = (scope as unknown as {
-      get(name: string): unknown
-    }).get('agents') as { list(): readonly Agent[] } | undefined
+    const agents = serviceOf<{ list(): readonly Agent[] }>(scope, 'agents')
     for (const agent of agents?.list() ?? []) restoreAgent(agent, true)
   }
 
@@ -462,10 +454,10 @@ export function apply(ctx: Context, config: PluginConfig = {}): void {
     runs,
     pause,
     readJobs: (agent) => {
-      const jobs = ctx.get('jobs') as {
+      const registry = service<{
         list(caller: typeof agent.session.id): readonly StatusJobView[]
-      } | undefined
-      return jobs?.list(agent.session.id) ?? []
+      }>('jobs')
+      return registry?.list(agent.session.id) ?? []
     },
   }))
 
@@ -515,10 +507,15 @@ async function loadSkill(
   name: string,
   signal: AbortSignal,
 ): Promise<SkillDefinition | undefined> {
-  const skills = ctx.get('skills') as {
+  const skills = serviceOf<{
     get(skillName: string, options: { cwd: string; scope: Agent }): Promise<SkillDefinition | undefined>
-  } | undefined
+  }>(ctx, 'skills')
   if (skills === undefined) return undefined
   const cwd = await ctx.workingDirectory.ensure(agent, signal)
   return await skills.get(name, { cwd, scope: agent })
+}
+
+/** Read one optional service without repeating the cordis type cast. */
+function serviceOf<T>(ctx: Context, name: string): T | undefined {
+  return (ctx as unknown as { get(name: string): unknown }).get(name) as T | undefined
 }

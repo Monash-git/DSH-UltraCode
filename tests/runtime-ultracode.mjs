@@ -229,6 +229,25 @@ function completionNotice(id, status = 'completed') {
   })
 }
 
+/**
+ * Start a real registry job and let the test settle it. The real tool-jobs
+ * settlement path then delivers the completion notice itself.
+ */
+function startSettlementJob(h, label = 'background research', kind = 'research') {
+  let resolveDone
+  const done = new Promise(resolve => { resolveDone = resolve })
+  const id = String(h.ctx.jobs.start({
+    kind,
+    label,
+    owner: h.agent.session.id,
+    run: () => ({ cancel: () => {}, done }),
+  }))
+  return {
+    id,
+    settle(status = 'completed') { resolveDone({ status }) },
+  }
+}
+
 function createWorkflowTool() {
   const calls = []
   const tool = defineTool({
@@ -275,12 +294,20 @@ async function createHarness(script, options = {}) {
     const toolSessionQuery = await import(pkg('dsh-tool-session-query/lib/index.js'))
     await ctx.plugin(toolSessionQuery, {})
   }
+  if (options.jobRuntime === true) {
+    const { default: LocalJobRegistry } = await import(pkg('dsh-jobs-local/lib/index.js'))
+    await ctx.plugin(LocalJobRegistry, {})
+  }
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(AgentLoop, { agents: [] })
   let jobs
   if (options.jobsService === true) {
     jobs = createJobsState()
     await ctx.plugin(FakeJobs, jobs)
+  }
+  if (options.jobRuntime === true) {
+    const toolJobs = await import(pkg('dsh-tool-jobs/lib/index.js'))
+    await ctx.plugin(toolJobs, {})
   }
   let ultraFiber
   if (options.plugins !== 'skills') {
@@ -1003,6 +1030,76 @@ async function scenarioActiveDuration() {
   }
 }
 
+async function scenarioActiveDurationReload() {
+  const h = await createHarness([
+    textResponse('Only the first background job remains.'),
+    textResponse('Only the second background job remains.'),
+    textResponse('After the reload, still only the background job remains.'),
+    toolCallResponse(
+      'call-duration-reload-complete',
+      'complete_run',
+      { summary: 'reload duration complete' },
+      'Collecting the final background job result.',
+    ),
+  ], { jobsService: true, pluginConfig: { maxDurationMs: 10 * 60 * 1000 } })
+  const realNow = Date.now
+  let offset = 0
+  try {
+    const first = h.jobs.live(h.agent.session.id, 'first workflow')
+    const second = h.jobs.live(h.agent.session.id, 'second workflow')
+    const last = h.jobs.live(h.agent.session.id, 'last workflow')
+    h.agent.followup(user('/tdd'))
+    await withTimeout(h.agent.whenIdle(), 'duration reload first stop')
+    assert.ok(runPhases(h.agent).includes('waiting_job'))
+
+    // Two hours elapse while the run waits. The span is now an accumulated
+    // inactive span and must survive the later reload.
+    offset = 2 * 60 * 60 * 1000
+    Date.now = () => realNow() + offset
+    h.jobs.settle(first)
+    h.agent.followup(completionNotice(first.id))
+    await withTimeout(h.agent.whenIdle(), 'duration reload second stop')
+    assert.ok(runPhases(h.agent).includes('waiting_job'))
+    const persisted = latestRun(h.agent)
+    assert.ok(
+      (persisted?.inactiveMs ?? 0) >= 2 * 60 * 60 * 1000,
+      `the earlier wait span must be persisted; got ${persisted?.inactiveMs}`,
+    )
+
+    // A hot reload rebuilds the in-memory run from the durable record.
+    await h.ultraFiber.dispose()
+    h.ultraFiber = await h.ctx.plugin(ultraPlugin, {})
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    // Another two hours of waiting must not turn the earlier span into
+    // active time and trip the ten-minute cap on resume.
+    offset = 4 * 60 * 60 * 1000
+    h.jobs.settle(second)
+    h.agent.followup(completionNotice(second.id))
+    await withTimeout(h.agent.whenIdle(), 'duration reload after reload')
+    const phases = runPhases(h.agent)
+    assert.ok(
+      !phases.includes('exhausted'),
+      `restored waiting time must stay inactive; phases: ${phases.join(', ')}`,
+    )
+    assert.equal(
+      phases.filter(phase => phase === 'waiting_job').length,
+      3,
+      'the run should yield again after the reload',
+    )
+    assert.equal(h.adapter.requests.length, 3, 'no wall-clock wrap-up turn may be started')
+
+    h.jobs.settle(last)
+    h.agent.followup(completionNotice(last.id))
+    await withTimeout(h.agent.whenIdle(), 'duration reload settle')
+    assert.ok(runPhases(h.agent).includes('completed'))
+    return { scenario: 'active-duration-reload', requests: h.adapter.requests.length, phases: runPhases(h.agent) }
+  } finally {
+    Date.now = realNow
+    await h.handle.dispose()
+  }
+}
+
 async function scenarioYieldRoundCap() {
   const h = await createHarness([
     textResponse('First stop while jobs run.'),
@@ -1116,6 +1213,11 @@ async function scenarioLocalSubagentPause() {
     })
     const child = childHandle.agent
     await new Promise(resolve => setTimeout(resolve, 10))
+    child.session.append('deliverables/presented', {
+      turn: 1,
+      callId: 'present-runtime-child',
+      files: [{ path: 'C:/tmp/runtime-child-report.md' }],
+    })
     child.followup(user('child task'))
     await withTimeout(h.wait.started, 'local pause child wait start')
 
@@ -1132,6 +1234,16 @@ async function scenarioLocalSubagentPause() {
     assert.equal(manifest.children[0].id, String(child.session.id))
     assert.equal(manifest.children[0].state, 'parked', 'the acknowledging child should be parked')
     assert.equal(manifest.forced, 0, 'an acknowledging child is not forced')
+    assert.deepEqual(
+      manifest.children[0].artifacts,
+      ['C:/tmp/runtime-child-report.md'],
+      'the manifest should carry the checkpoint artifact paths',
+    )
+    assert.deepEqual(
+      checkpoints(child).at(-1)?.artifacts,
+      ['C:/tmp/runtime-child-report.md'],
+      'the child checkpoint should carry its artifact paths',
+    )
     assert.equal(child.status, 'running', 'a parked child keeps its turn open')
     assert.equal(h.adapter.requests.length, 1, 'parking must not spend a model request')
     assert.ok(
@@ -1180,9 +1292,11 @@ async function scenarioPauseWakeGate() {
       { summary: 'held completion notice released' },
       'Collecting the background job result.',
     ),
-  ], { jobsService: true })
+  ], { jobRuntime: true })
   try {
-    const job = h.jobs.live(h.agent.session.id)
+    // A non-workflow/bash job survives pause by policy. Letting the real job
+    // runtime settle it is a settlement-driven notice, not a test-injected one.
+    const job = startSettlementJob(h)
     h.agent.followup(user('/tdd'))
     await withTimeout(h.agent.whenIdle(), 'pause-wake first stop')
     assert.ok(runPhases(h.agent).includes('waiting_job'), 'the run should yield on the live job')
@@ -1193,23 +1307,27 @@ async function scenarioPauseWakeGate() {
       () => latestPauseManifest(h.agent)?.phase === 'paused',
       'pause-wake manifest paused',
     )
+    await withTimeout(h.agent.whenIdle(), 'pause-wake idle')
     const requestsAtPause = h.adapter.requests.length
     assert.equal(latestRun(h.agent)?.phase, 'paused_user')
     assert.equal(pauseRecords(h.agent).at(-1)?.paused, true)
 
-    h.jobs.settle(job)
-    h.agent.followup(completionNotice(job.id))
+    job.settle()
+    await waitForCondition(
+      () => openWakeHolds(h.agent).length === 1,
+      'pause-wake settlement notice held',
+    )
     await withTimeout(h.agent.whenIdle(), 'pause-wake held notice')
 
     assert.equal(
       h.adapter.requests.length,
       requestsAtPause,
-      'a completion wake must not open a model turn while paused',
+      'a settlement wake must not open a model request while paused',
     )
     assert.equal(pauseRecords(h.agent).at(-1)?.paused, true, 'the wake must not clear the pause')
     const held = wakeHolds(h.agent)
     assert.equal(held.length, 1, 'the completion notice should be held durably')
-    assert.ok(JSON.stringify(held[0]).includes(job.id), 'the hold should preserve the notice')
+    assert.ok(JSON.stringify(held[0]).includes(job.id), 'the hold should preserve the real job id')
     assert.equal(latestRun(h.agent)?.phase, 'paused_user', 'a held wake is not a resume')
 
     const resumed = await h.ctx.commands.execute(h.agent, '/resume', [], new AbortController().signal)
@@ -1595,8 +1713,23 @@ async function scenarioWorkflowBashPause() {
     assert.ok(after.restartInstruction.includes('audit workflow'))
     assert.ok(after.restartInstruction.includes('pnpm test'))
     assert.ok(after.restartInstruction.includes('run-level resume'))
+    assert.ok(
+      after.restartInstruction.includes('saved_workflow_plan')
+      && after.restartInstruction.includes('phase')
+      && after.restartInstruction.includes('scan'),
+      'the saved plan content must reach the restart instruction',
+    )
+    assert.ok(
+      after.restartInstruction.includes('C:/tmp/runtime-audit.log'),
+      'the captured artifact path must reach the restart instruction',
+    )
     const resumedRequest = requestText(h.adapter.requests.at(-1))
     assert.ok(resumedRequest.includes('run-level resume'), 'the root receives the restart instruction')
+    assert.ok(
+      resumedRequest.includes('saved_workflow_plan')
+      && resumedRequest.includes('C:/tmp/runtime-audit.log'),
+      'the model-visible request must carry the saved plan and artifact paths',
+    )
     assert.ok(!resumedRequest.includes('Ultra host pause'), 'no host control reaches a model')
     return { scenario: 'workflow-bash-pause', jobs: 2, requests: h.adapter.requests.length }
   } finally {
@@ -1628,6 +1761,7 @@ for (const scenario of [
   scenarioWaitingJobUserMessage,
   scenarioQuestionBeatsJob,
   scenarioActiveDuration,
+  scenarioActiveDurationReload,
   scenarioYieldRoundCap,
   scenarioPendingUserPreemptsYield,
   scenarioRoundCap,

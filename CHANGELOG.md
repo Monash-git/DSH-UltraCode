@@ -2,14 +2,23 @@
 
 ## Unreleased
 
+- Hardened the pause semantics found in review: cancelling a pause now stops
+  parked children instead of releasing them to continue old work, cancelling
+  during `pausing` still stops owned workflow/bash jobs, accumulated inactive
+  time survives reload/restart, child checkpoints and the pause manifest carry
+  bounded artifact paths, and the Play restart instruction includes the saved
+  workflow plan and artifact paths so it is actionable.
 - Made pause durable across reload and process restart with a completion-wake
   gate. A background job notice, subagent settlement, or other non-human wake
   claimed while paused is stored verbatim as a `plugin:ultracode/wake-hold`
-  record and the step is rejected, so no model request is made; Play replays
+  record and the step is rejected, so no model request is made; DSH may still
+  open a turn boundary, but it never starts a model request. Play replays
   every unreleased hold and records a durable release. Text sent while paused
   cancels the pause and releases held wakes into the new direction. A pause
   restored after a restart reports that its background jobs did not survive
-  and must be restarted from the saved plan or checkpoint.
+  and must be restarted from the saved plan or checkpoint. A settlement in
+  DSH's driver retirement window can still be injected without waking until
+  the next user input; that limit belongs to the agent loop.
 - Pause now stops workflow and bash/pwsh background jobs instead of leaving
   them running. After the child park drain, the coordinator requests a kill
   through the host jobs service and waits a short bounded drain for

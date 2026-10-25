@@ -21,6 +21,8 @@ export interface ParkAcknowledgement {
   readonly pauseId: string
   readonly checkpointAt: number
   readonly checkpointSeq: number
+  /** Artifact paths the checkpoint captured, when the session presented any. */
+  readonly artifacts?: readonly string[]
 }
 
 /** Build the host-only control message that wakes a child toward its park point. */

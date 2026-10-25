@@ -43,6 +43,7 @@ function fakeContext(overrides: Partial<CommandContext> = {}): {
     requestCancel: vi.fn(),
     pause: vi.fn(() => ({ ok: true, text: 'Session paused.' })),
     resume: vi.fn(() => ({ ok: true, text: 'Session resumed.' })),
+    resumeAsync: vi.fn(async () => ({ ok: true, text: 'Session resumed.' })),
   } as unknown as CommandContext['pause']
   const ultra = overrides.ultra ?? {
     isSelectorUltra: vi.fn(() => false),
@@ -158,7 +159,8 @@ describe('/pause and /resume commands', () => {
     expect(handlePauseCommand(agent, context).kind).toBe('success')
     expect((await handleResumeCommand(agent, context)).kind).toBe('success')
     expect(pause.pause).toHaveBeenCalledWith(agent)
-    expect(pause.resume).toHaveBeenCalledWith(agent)
+    expect(pause.resumeAsync).toHaveBeenCalledWith(agent)
+    expect(pause.resume).not.toHaveBeenCalled()
     expect(ultra.requestFullPlaybook).toHaveBeenCalledWith(agent)
   })
 

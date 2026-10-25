@@ -672,7 +672,14 @@ describe('root pause protocol for local subagents', () => {
     expect(resumed.workflows?.[0]).toMatchObject({ runId: 'run-1', state: 'restart-required' })
     expect(resumed.restartInstruction).toContain('C:/tmp/audit.log')
     expect(resumed.restartInstruction).toContain(child.id)
+    // The saved plan is handed to the model, not just described in prose.
+    expect(resumed.restartInstruction).toContain('phase("scan")')
+    expect(resumed.restartInstruction).toContain('await agent("inspect")')
     expect(resumed.restartInstruction).toMatch(/run-level resume/i)
+    const injected = (world.root.inject as unknown as {
+      mock: { calls: unknown[][] }
+    }).mock.calls.map(call => JSON.stringify(call[0]))
+    expect(injected.some(text => text.includes('saved_workflow_plan'))).toBe(true)
     expect(child.batches).toEqual([])
   })
 
@@ -912,7 +919,7 @@ describe('root pause protocol for local subagents', () => {
     expect(jobs.kills).toEqual([])
   })
 
-  it('cancels the pause and releases parked children when the user starts a new direction', async () => {
+  it('cancels the pause and stops parked children when the user starts a new direction', async () => {
     const world = createWorld()
     const child = world.addChild('parked child')
     child.status = 'running'
@@ -924,8 +931,65 @@ describe('root pause protocol for local subagents', () => {
     expect(world.pause.isPaused(world.root)).toBe(false)
     await waitFor(() => latestManifest(world.root)?.phase === 'cancelled', 'manifest cancelled by user text')
     await child.settled()
-    expect(child.batches).toEqual([[]])
+    // Old child work must not continue: the parked turn is aborted and the
+    // child is stopped, so the model sees no batch from the cancelled pause.
+    expect(child.batches).toEqual([])
+    expect(child.cancelCalls).toContainEqual([{ kind: 'parent' }, { keepInbox: true }])
     expect(latestManifest(world.root)?.children[0]?.state).toBe('cancelled')
+  })
+
+  it('stops owned jobs when a pausing pause is cancelled before its drain finishes', async () => {
+    const jobs = new FakeJobs()
+    const world = createWorld({ timeoutMs: 200, drainMs: 5, jobs })
+    const child = world.addChild('slow child')
+    child.autoPump = false
+    child.status = 'running'
+    const rootId = String(world.root.session.id)
+    const job = jobs.add({ kind: 'bash', label: 'long build', owner: rootId })
+
+    world.pause.pause(world.root)
+    await waitFor(() => latestManifest(world.root)?.phase === 'pausing', 'pause still pausing')
+    expect(latestManifest(world.root)?.jobs[0]).toMatchObject({ id: job.id, disposition: 'recorded' })
+
+    const released = await world.coordinator.release(world.root, 'cancel')
+    expect(released.children[0]).toMatchObject({ id: child.id, state: 'cancelled' })
+    // The cancel must own the stop once begin() is on its way out.
+    expect(jobs.kills).toEqual([{ id: job.id, caller: rootId, reason: 'paused by user' }])
+    expect(latestManifest(world.root)?.jobs[0]).toMatchObject({
+      id: job.id,
+      disposition: 'cancelled',
+      status: 'killed',
+    })
+    // The child never reached its park point; it is stopped, not resumed.
+    expect(child.batches).toEqual([])
+    expect(child.cancelCalls).toContainEqual([{ kind: 'parent' }, { keepInbox: true }])
+    await waitFor(() => latestManifest(world.root)?.phase === 'cancelled', 'cancel settles')
+  })
+
+  it('captures artifact paths from the child session in the checkpoint and manifest', async () => {
+    const world = createWorld()
+    const child = world.addChild('presenting child')
+    child.status = 'running'
+    const present = (path: string): void => {
+      ;(child.agent.session as unknown as { append(type: string, data: unknown): unknown }).append(
+        'deliverables/presented',
+        { turn: 1, callId: `present-${path}`, files: [{ path }] },
+      )
+    }
+    present('C:/tmp/child-report.md')
+    present('C:/tmp/child-summary.json')
+
+    world.pause.pause(world.root)
+    await waitFor(() => latestManifest(world.root)?.phase === 'paused', 'artifact checkpoint paused')
+
+    expect(checkpointEvents(child.agent).at(-1)).toMatchObject({
+      artifacts: ['C:/tmp/child-report.md', 'C:/tmp/child-summary.json'],
+    })
+    expect(latestManifest(world.root)?.children[0]).toMatchObject({
+      id: child.id,
+      state: 'parked',
+      artifacts: ['C:/tmp/child-report.md', 'C:/tmp/child-summary.json'],
+    })
   })
 })
 

@@ -6,24 +6,12 @@
  * no knowledge of tickets, phases, or a particular skill.
  */
 
-import type { Agent } from '@deepseek-ai/dsh-agent'
-import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
+import { OncePromptController } from './once-prompt.js'
 import { OBSERVATION_MARKER, OBSERVATION_PROMPT } from './prompts.js'
-import { hasPromptSinceCompaction, isRootAgent } from './state.js'
 
 /** Appends the safe-observation prompt once per root-session context. */
-export class ObservationController {
-  /**
-   * Return the prompt once per context, or an empty list when the current
-   * context already has it. A compaction drops the model-visible copy, so the
-   * prompt is re-anchored once after each compaction.
-   */
-  onPreStep(agent: Agent): UserMessage[] {
-    if (!isRootAgent(agent)) return []
-    if (hasPromptSinceCompaction(agent, OBSERVATION_MARKER)) return []
-    return [createUserMessage({
-      content: [{ type: 'text', text: OBSERVATION_PROMPT }],
-      source: { kind: 'ultracode' },
-    })]
+export class ObservationController extends OncePromptController {
+  constructor() {
+    super({ marker: OBSERVATION_MARKER, text: OBSERVATION_PROMPT })
   }
 }

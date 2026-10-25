@@ -70,9 +70,7 @@ export function handlePauseCommand(agent: Agent, context: CommandContext): Comma
 
 /** Handle `/resume`; waits for child release so warnings reach the command card. */
 export async function handleResumeCommand(agent: Agent, context: CommandContext): Promise<CommandResult> {
-  const outcome = context.pause.resumeAsync === undefined
-    ? context.pause.resume(agent)
-    : await context.pause.resumeAsync(agent)
+  const outcome = await context.pause.resumeAsync(agent)
   if (outcome.ok) context.ultra.requestFullPlaybook(agent)
   return outcome.ok ? { kind: 'success', text: outcome.text } : { kind: 'error', text: outcome.text }
 }

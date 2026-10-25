@@ -26,6 +26,10 @@ export interface AutopilotRunEvent {
   readonly startedAt: number
   readonly updatedAt: number
   readonly reason?: string
+  /** Non-active milliseconds accumulated before the current span. */
+  readonly inactiveMs?: number
+  /** Epoch time the current waiting or paused span began, when one is open. */
+  readonly inactiveSince?: number
 }
 
 /** Durable, log-only record of the Ultra standing-mode state. */
@@ -78,6 +82,8 @@ export interface PauseManifestChild {
   readonly acknowledgedAt?: number
   readonly checkpointAt?: number
   readonly checkpointSeq?: number
+  /** Bounded artifact paths the child presented before its checkpoint. */
+  readonly artifacts?: readonly string[]
   readonly warning?: string
 }
 
@@ -186,6 +192,8 @@ export interface PauseCheckpointEvent {
   readonly forced: boolean
   readonly todos?: readonly { readonly content: string; readonly status: string }[]
   readonly lastAssistantText?: string
+  /** Bounded artifact paths the session presented before the checkpoint. */
+  readonly artifacts?: readonly string[]
 }
 
 /** Pausing progress and forced-stop facts carried by the client projection. */

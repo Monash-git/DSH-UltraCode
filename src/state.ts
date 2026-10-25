@@ -50,10 +50,26 @@ export interface JobRegistryLike {
   get?(id: unknown, caller?: unknown): JobViewLike
 }
 
+/** Job statuses whose work is still owned and spending. */
+const LIVE_JOB_STATUSES: ReadonlySet<string> = new Set(['running', 'stopping'])
+
+/** Job statuses that will never run or spend again. */
+const TERMINAL_JOB_STATUSES: ReadonlySet<string> = new Set(['completed', 'killed', 'failed'])
+
+/** Whether a job is still live (running or stopping). */
+export function isLiveJobStatus(status: string | undefined): boolean {
+  return status !== undefined && LIVE_JOB_STATUSES.has(status)
+}
+
+/** Whether a job has reached a terminal state. */
+export function isTerminalJobStatus(status: string | undefined): boolean {
+  return status !== undefined && TERMINAL_JOB_STATUSES.has(status)
+}
+
 /**
- * The first `running` job owned by this session. `stopping` jobs settle as
- * killed and deliberately send no completion notice, and unowned jobs wake
- * nobody, so yielding on either would strand the run.
+ * The first `running` job owned by this session. A `stopping` job is still
+ * live but settles as killed and deliberately sends no completion notice, and
+ * unowned jobs wake nobody, so yielding on either would strand the run.
  */
 export function liveOwnedJob(
   registry: JobRegistryLike | undefined,
@@ -133,7 +149,7 @@ export function createRunState(
   }
 }
 
-/** Restore live state from a durable event. */
+/** Restore live state from a durable event, including earlier inactive spans. */
 export function fromRunEvent(event: AutopilotRunEvent, config: ResolvedConfig): RunState {
   return {
     runId: event.runId,
@@ -146,7 +162,8 @@ export function fromRunEvent(event: AutopilotRunEvent, config: ResolvedConfig): 
     updatedAt: event.updatedAt,
     ...event.reason === undefined ? {} : { reason: event.reason },
     noProgressCount: 0,
-    inactiveMs: 0,
+    inactiveMs: event.inactiveMs ?? 0,
+    ...event.inactiveSince === undefined ? {} : { inactiveSince: event.inactiveSince },
   }
 }
 
@@ -190,6 +207,8 @@ export function appendRunEvent(agent: SessionCarrier, run: RunState): void {
     startedAt: run.startedAt,
     updatedAt: run.updatedAt,
     ...run.reason === undefined ? {} : { reason: run.reason },
+    inactiveMs: run.inactiveMs,
+    ...run.inactiveSince === undefined ? {} : { inactiveSince: run.inactiveSince },
   })
 }
 
@@ -491,6 +510,36 @@ export function latestAssistantText(agent: SessionCarrier): string {
     if (block.type === 'text') parts.push(block.text)
   }
   return parts.join('\n')
+}
+
+/** Bound the artifact list a checkpoint carries. */
+const MAX_ARTIFACT_PATHS = 20
+/** Bound one artifact path so a record cannot grow without limit. */
+const MAX_ARTIFACT_PATH_CHARS = 500
+
+/**
+ * Bounded artifact paths the session presented through the `present` tool.
+ * The newest unique paths survive; older duplicates are dropped first.
+ */
+export function latestArtifactPaths(agent: SessionCarrier): string[] {
+  const paths: string[] = []
+  for (const event of agent.session.snapshotEvents()) {
+    if ((event.type as string) !== 'deliverables/presented') continue
+    const data = event.data as { files?: unknown }
+    if (!Array.isArray(data.files)) continue
+    for (const file of data.files) {
+      if (typeof file !== 'object' || file === null) continue
+      const path = (file as { path?: unknown }).path
+      if (typeof path !== 'string' || path === '') continue
+      const bounded = path.length <= MAX_ARTIFACT_PATH_CHARS
+        ? path
+        : `${path.slice(0, MAX_ARTIFACT_PATH_CHARS - 1)}…`
+      if (paths.includes(bounded)) continue
+      paths.push(bounded)
+      if (paths.length > MAX_ARTIFACT_PATHS) paths.shift()
+    }
+  }
+  return paths
 }
 
 function lastEvent(

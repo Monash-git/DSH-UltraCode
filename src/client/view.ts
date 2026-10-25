@@ -6,13 +6,7 @@ import en from '../../locale/en.json' with { type: 'json' }
 export interface UltraView {
   readonly paused?: boolean
   readonly reason?: string | null
-  readonly pauseStatus?: {
-    readonly phase?: string
-    readonly acknowledged?: number
-    readonly total?: number
-    readonly forced?: number
-    readonly warning?: string
-  } | null
+  readonly pauseStatus?: PauseProgress | null
   readonly run?: { readonly phase?: string } | null
 }
 

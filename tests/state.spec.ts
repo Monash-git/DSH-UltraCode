@@ -13,6 +13,7 @@ import {
   inboxHasUserWork,
   isRootAgent,
   isUnfinishedPhase,
+  latestArtifactPaths,
   latestModeEvent,
   latestModelSelection,
   latestPauseEvent,
@@ -163,6 +164,59 @@ describe('run state', () => {
 
     resumeRunActive(run, 20_000)
     expect(activeElapsedMs(run, 21_000)).toBe(4_000)
+  })
+
+  it('persists earlier inactive spans so a reload cannot count them as active', () => {
+    const agent = carrier()
+    const config = resolveConfig()
+    const run = createRunState('tdd', config)
+    run.phase = 'running'
+    run.startedAt = 1_000
+    markRunWaiting(run, 2_000)
+    resumeRunActive(run, 10_000)
+    expect(run.inactiveMs).toBe(8_000)
+
+    appendRunEvent(agent, run)
+    const first = latestRunEvent(agent.session.snapshotEvents())!
+    expect(first.inactiveMs).toBe(8_000)
+    const restored = fromRunEvent(first, config)
+    expect(restored.inactiveMs).toBe(8_000)
+    expect(activeElapsedMs(restored, 12_000)).toBe(3_000)
+
+    // A second waiting span (with its start time) also survives a reload:
+    // the whole span, not just time since the last record, stays inactive.
+    markRunWaiting(restored, 12_000)
+    appendRunEvent(agent, restored)
+    const second = latestRunEvent(agent.session.snapshotEvents())!
+    expect(second.inactiveSince).toBe(12_000)
+    const reRestored = fromRunEvent(second, config)
+    expect(reRestored.inactiveMs).toBe(8_000)
+    expect(reRestored.inactiveSince).toBe(12_000)
+    expect(activeElapsedMs(reRestored, 22_000)).toBe(3_000)
+  })
+
+  it('collects bounded, unique artifact paths from present events', () => {
+    const agent = carrier()
+    const append = (files: Array<{ path: string }>): void => {
+      ;(agent.session as unknown as { append(type: string, data: unknown): unknown }).append(
+        'deliverables/presented',
+        { turn: 1, callId: `present-${files.length}`, files },
+      )
+    }
+    append([{ path: 'C:/tmp/report.md' }, { path: 'C:/tmp/data.csv' }])
+    append([{ path: 'C:/tmp/data.csv' }, { path: 'C:/tmp/final.pdf' }])
+    expect(latestArtifactPaths(agent)).toEqual([
+      'C:/tmp/report.md',
+      'C:/tmp/data.csv',
+      'C:/tmp/final.pdf',
+    ])
+
+    const many = Array.from({ length: 25 }, (_value, index) => ({ path: `C:/tmp/artifact-${index}.txt` }))
+    append(many)
+    const bounded = latestArtifactPaths(agent)
+    expect(bounded).toHaveLength(20)
+    expect(bounded.at(0)).toBe('C:/tmp/artifact-5.txt')
+    expect(bounded.at(-1)).toBe('C:/tmp/artifact-24.txt')
   })
 
   it('reads the latest model selection and open turn', () => {

@@ -18,6 +18,7 @@ import {
   appendPauseManifest,
   appendRunEvent,
   hasHumanMessageAfter,
+  isLiveJobStatus,
   isRootAgent,
   isUnfinishedPhase,
   lastSeq,
@@ -507,7 +508,7 @@ export class PauseController {
  */
 function jobRestartWarning(manifest: PauseManifestEvent | undefined): string | undefined {
   if (manifest === undefined) return undefined
-  const lost = manifest.jobs.filter(job => job.status === 'running' || job.status === 'stopping')
+  const lost = manifest.jobs.filter(job => isLiveJobStatus(job.status))
   if (lost.length === 0) return undefined
   const subject = lost.length === 1 ? '1 background job' : `${lost.length} background jobs`
   const object = lost.length === 1 ? 'it' : 'them'

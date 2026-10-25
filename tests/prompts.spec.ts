@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
   autopilotBanner,
+  BACKGROUND_JOB_RULE,
   continuationNudge,
+  genericResumeNudge,
+  REPLY_FIRST_RULE,
   TASK_STATE_PROMPT,
   ULTRA_STANDING_PLAYBOOK,
   ultraReminder,
@@ -45,6 +48,17 @@ describe('reply-first prompt assets', () => {
     expect(ULTRA_STANDING_PLAYBOOK).not.toMatch(/ticket|phase/i)
     expect(autopilotBanner('tdd', 1, 20)).not.toMatch(/ticket|phase/i)
     expect(continuationNudge('tdd', 2, 20, '1 completed, 1 open', 'tests')).not.toMatch(/ticket|phase/i)
+  })
+
+  it('keeps ticket, phase, and skill-specific vocabulary out of every generic asset', () => {
+    for (const text of [
+      TASK_STATE_PROMPT,
+      REPLY_FIRST_RULE,
+      BACKGROUND_JOB_RULE,
+      genericResumeNudge('1 completed, 1 open'),
+    ]) {
+      expect(text).not.toMatch(FORBIDDEN_TASK_STATE_VOCABULARY)
+    }
   })
 })
 

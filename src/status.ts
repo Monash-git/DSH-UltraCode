@@ -10,6 +10,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import {
+  isLiveJobStatus,
   isRootAgent,
   sessionKey,
   todoSnapshot,
@@ -83,8 +84,6 @@ export interface StatusToolDeps {
   readJobs(agent: Agent): readonly StatusJobView[]
 }
 
-const ACTIVE_JOB_STATUSES = new Set(['running', 'stopping'])
-
 /** Fold a status report from live state without mutating anything. */
 export function collectStatus(input: StatusInput): SessionStatus {
   const { turn, step } = currentTurnAndStep(input.events)
@@ -94,7 +93,7 @@ export function collectStatus(input: StatusInput): SessionStatus {
   const activeJobs = (input.jobs ?? [])
     .filter(job => job.owner !== undefined
       && String(job.owner) === input.sessionId
-      && ACTIVE_JOB_STATUSES.has(job.status))
+      && isLiveJobStatus(job.status))
     .map(job => ({
       id: job.id,
       kind: job.kind,
