@@ -5,6 +5,7 @@
   "type": "module",
   "description": "DSH Ultra standing mode, autopilot, steering, pause/resume, and the primary composer pause/play action.",
   "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/Monash-git/DSH-UltraCode.git" },
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",
   "exports": {
