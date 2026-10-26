@@ -1,0 +1,1 @@
+{"version":3,"file":"task-state.js","sourceRoot":"","sources":["../src/task-state.ts"],"names":[],"mappings":"AAAA;;;;;GAKG;AAEH,OAAO,EAAE,oBAAoB,EAAE,MAAM,kBAAkB,CAAA;AACvD,OAAO,EAAE,iBAAiB,EAAE,iBAAiB,EAAE,MAAM,cAAc,CAAA;AAEnE,qFAAqF;AACrF,MAAM,OAAO,mBAAoB,SAAQ,oBAAoB;IAC3D;QACE,KAAK,CAAC,EAAE,MAAM,EAAE,iBAAiB,EAAE,IAAI,EAAE,iBAAiB,EAAE,CAAC,CAAA;IAC/D,CAAC;CACF"}

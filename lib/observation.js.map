@@ -1,0 +1,1 @@
+{"version":3,"file":"observation.js","sourceRoot":"","sources":["../src/observation.ts"],"names":[],"mappings":"AAAA;;;;;;GAMG;AAEH,OAAO,EAAE,oBAAoB,EAAE,MAAM,kBAAkB,CAAA;AACvD,OAAO,EAAE,kBAAkB,EAAE,kBAAkB,EAAE,MAAM,cAAc,CAAA;AAErE,yEAAyE;AACzE,MAAM,OAAO,qBAAsB,SAAQ,oBAAoB;IAC7D;QACE,KAAK,CAAC,EAAE,MAAM,EAAE,kBAAkB,EAAE,IAAI,EAAE,kBAAkB,EAAE,CAAC,CAAA;IACjE,CAAC;CACF"}
